@@ -10,10 +10,10 @@ name: Release
 #        release: for every package whose version the PR changed, builds and smoke-tests the wheel
 #          and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release with the two files
 #          attached.
+#        next-development-version: opens a PR that moves the released packages to their next
+#          development version, X.(Y+1).0.dev0. Merge it any time.
 #        publish-testpypi: waits for approval in the pypi environment, then uploads those files.
 #        publish-pypi: waits for approval too, then uploads the same files.
-#        next-development-version: opens a PR that moves the released packages to their next
-#          development version, X.(Y+1).0.dev0. Merge it.
 #      The publish jobs upload the files the release holds. They do not build.
 # Releasing both raises the masquare-timenet floor of masquare-timenet-connectors to the new masquare-timenet version.
 # Releasing one package alone keeps the floor. The release PR warns when the other package has
@@ -401,9 +401,10 @@ jobs:
           done >> "$GITHUB_STEP_SUMMARY"
 
   next-development-version:
-    # Runs after the PyPI upload only. It is its own job, so the App key never shares a runner
-    # with the OIDC token that uploads to PyPI.
-    needs: [release, publish-pypi]
+    # Runs right after the release, next to the publish jobs. The tag fixes the released version
+    # whether or not PyPI takes it. It is its own job, so the App key never shares a runner with the
+    # OIDC token that uploads to PyPI.
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
