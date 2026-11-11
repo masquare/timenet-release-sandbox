@@ -1,0 +1,281 @@
+"""A synthetic, offline connector that tests every TimeF feature.
+
+``HelloWorldConnector`` needs no network. It creates a fully deterministic dataset. The writer and
+reader test suites use this dataset as a fixture for round-trip tests. The connector covers two
+modalities, explicit Sources, independent signals, and a windowed record. It also
+covers a longer series. The writer tests split this longer series into chunks under a small chunk
+cap. The connector covers all three annotation shapes, including one shared across records, and a
+task chain.
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from jaxtyping import Float, Float64
+import numpy as np
+import pyarrow as pa
+
+from timenet.connectors import BaseConnector
+from timenet.dataset import Record, Signal, Source, TimeFDataset
+from timenet.dataset.axis import RegularAxis
+from timenet.types import (
+    Annotation,
+    AnswerTask,
+    ClassificationTask,
+    Label,
+    LabelSet,
+    LocalizationMode,
+    ScalarPredictionTask,
+    TemporalLocalizationTask,
+    TimeInterval,
+    TimePoint,
+    TimeSeriesSpec,
+    ureg,
+)
+
+
+_SAMPLING_RATE_HZ = 16.0
+_AXIS = RegularAxis.from_rate_hz(16)
+_SINE = TimeSeriesSpec(
+    spec_type="sine",
+    name="Sine",
+    unit_value=ureg.dimensionless,
+)
+_COSINE = TimeSeriesSpec(
+    spec_type="cosine",
+    name="Cosine",
+    unit_value=ureg.dimensionless,
+)
+# Each classification task draws its target from a label set that every task with the same question
+# shares.
+_RHYTHM = LabelSet(
+    name="rhythm",
+    labels=(Label(name="normal", description="A regular wave."), Label(name="abnormal")),
+)
+_EVENT = LabelSet(
+    name="event",
+    labels=(Label(name="onset", description="The moment the wave starts."), Label(name="offset")),
+)
+
+
+@dataclass(frozen=True)
+class HelloWorldRecording:
+    """A lightweight, deterministic description of one synthetic recording."""
+
+    index: int
+    n_values: int
+
+
+def _wave_values(
+    fn: Callable[[Float64[np.ndarray, " time"]], Float[np.ndarray, " time"]], n: int, phase: float
+) -> Float[np.ndarray, " time"]:
+    """Compute a closed-form wave as an array.
+
+    The function does not use a random number generator or perform I/O.
+
+    Args:
+        fn: The wave function to apply to the angular time base, for example ``np.sin``.
+        n: The number of samples.
+        phase: The phase offset in radians.
+
+    Returns:
+        The wave values as a float32 ``np.ndarray``.
+    """
+    t = np.arange(n, dtype=np.float64) / _SAMPLING_RATE_HZ
+    return fn(2.0 * np.pi * t + phase).astype(np.float32)
+
+
+def _wave(
+    fn: Callable[[Float64[np.ndarray, " time"]], Float[np.ndarray, " time"]], n: int, phase: float
+) -> Callable[[], pa.Array]:
+    """Build a deterministic lazy loader for a closed-form wave.
+
+    The connector uses this loader for the long series that the writer splits into chunks.
+
+    Args:
+        fn: The wave function to apply to the angular time base, for example ``np.sin``.
+        n: The number of samples.
+        phase: The phase offset in radians.
+
+    Returns:
+        A loader with no arguments. The loader returns the wave as a float32 Arrow array.
+    """
+    return lambda: pa.array(_wave_values(fn, n, phase))
+
+
+class HelloWorldConnector(BaseConnector[HelloWorldRecording]):
+    """A deterministic, offline demo connector for the ``timenet/hello-world`` dataset."""
+
+    # Override: the data is synthetic, so this method needs no cache.
+    # ruff: ignore[unused-method-argument, no-self-use]
+    def download(self, cache_dir: Path) -> list[HelloWorldRecording]:
+        """Return deterministic recording descriptions.
+
+        This method uses no network and does not use ``cache_dir``.
+
+        Args:
+            cache_dir: Not used. The data is synthetic.
+
+        Returns:
+            One short recording and one longer recording. The writer splits the longer recording into
+            chunks under a small chunk cap.
+        """
+        return [HelloWorldRecording(index=0, n_values=16), HelloWorldRecording(index=1, n_values=512)]
+
+    def convert(self, raw_refs: list[HelloWorldRecording]) -> TimeFDataset:
+        """Build the complete dataset from the recording descriptions.
+
+        The dataset includes every TimeF feature.
+
+        Args:
+            raw_refs: The recordings from :meth:`download`.
+
+        Returns:
+            The populated :class:`~timenet.dataset.TimeFDataset`.
+        """
+        dataset = TimeFDataset(metadata=self.metadata())
+
+        # Record 0's sine signal.
+        shared = Signal.from_values(
+            _wave_values(np.sin, raw_refs[0].n_values, phase=0.0),
+            spec=_SINE,
+            name="a",
+            time_axis=_AXIS,
+        )
+        # An annotation shared across two records. The writer stores equal content once, so they share
+        # one content row.
+        cohort = Annotation(key="cohort", value="A")
+
+        # Record 0: the full recording, with two modalities, all annotation shapes, and a task chain.
+        cosine = Signal.from_values(
+            _wave_values(np.cos, raw_refs[0].n_values, phase=0.0),
+            spec=_COSINE,
+            name="b",
+            time_axis=_AXIS,
+        )
+        record0 = Record(
+            sources=(
+                Source(
+                    name="Synthetic generator",
+                    signals=(shared, cosine),
+                ),
+            ),
+        )
+        dataset.add_record(record=record0)
+        # The localization task below references these annotations instead of repeating the literal values.
+        stimulus = Annotation(key="stimulus", span=TimePoint.seconds(0.5))
+        artifact = Annotation(key="artifact", span=TimeInterval.seconds(0.0, 0.25))
+        _, record0_cohort, stimulus = record0.add_annotations(
+            [
+                Annotation(key="age", value=64, unit="years"),
+                cohort,
+                stimulus,
+            ]
+        )
+        artifact = shared.annotate(artifact)
+        classification = ClassificationTask(
+            inputs=(record0,),
+            targets=("normal",),
+            label_set=_RHYTHM,
+        )
+        dataset.add_tasks(
+            tasks=[
+                classification,
+                AnswerTask(
+                    inputs=(record0,),
+                    prompt="What rhythm?",
+                    targets=("Normal.",),
+                    # Any task can carry a chain of thought. An answer task with a chain of thought is
+                    # the old reasoning task.
+                    rationale="The peaks repeat once per cycle at a constant interval.",
+                    # The cohort annotation gives context to the model. The model does not need to
+                    # produce this annotation.
+                    input_annotations=(record0_cohort,),
+                    from_tasks=(classification,),
+                ),
+                ScalarPredictionTask(
+                    inputs=(record0,),
+                    targets=(60.0,),
+                    unit="bpm",
+                    target_name="mean_rate",
+                ),
+                # Localization works backward from a normal task. The query is the input, and the
+                # regions are the output. Here, the task stores the answer by reference, so the target
+                # is the two temporal annotations above.
+                TemporalLocalizationTask(
+                    inputs=(record0,),
+                    prompt="Locate the stimulus and the artifact.",
+                    mode=LocalizationMode.SPARSE,
+                    target_annotations=(stimulus, artifact),
+                ),
+            ],
+        )
+
+        # Record 1: a short signal and a longer signal. The writer tests split the longer signal into
+        # chunks under a small chunk cap.
+        long_series = Signal.from_loader(
+            spec=_SINE,
+            name="a",
+            time_axis=_AXIS,
+            loader=_wave(np.sin, raw_refs[1].n_values, phase=1.0),
+            n_values=raw_refs[1].n_values,
+        )
+        record1 = Record(
+            sources=(
+                Source(
+                    name="Synthetic generator",
+                    signals=(
+                        Signal.from_values(
+                            _wave_values(np.sin, raw_refs[0].n_values, phase=0.0),
+                            spec=_SINE,
+                            name="a",
+                            time_axis=_AXIS,
+                        ),
+                        long_series,
+                    ),
+                ),
+            ),
+        )
+        dataset.add_record(record=record1)
+        record1.annotate(cohort)  # equal content, so the writer stores it once
+
+        # Record 2: a windowed slice with a scoped classification task. This window covers the second
+        # half of rec-0. As a result, the window is a true offset window and not a byte-identical
+        # prefix of the shared sine signal. The phase offset continues the same wave. The values
+        # therefore match rec-0 over the window.
+        window_start = raw_refs[0].n_values // 2
+        window = Signal.from_values(
+            _wave_values(
+                np.sin,
+                raw_refs[0].n_values - window_start,
+                phase=2.0 * np.pi * window_start / _SAMPLING_RATE_HZ,
+            ),
+            spec=_SINE,
+            name="a",
+            time_axis=_AXIS.at_index(window_start),
+        )
+        record2 = Record(
+            sources=(
+                Source(
+                    name="Synthetic generator",
+                    signals=(window,),
+                ),
+            ),
+        )
+        dataset.add_record(record=record2)
+        # A scope narrows the input to a region. This task has the same task type as the whole-record
+        # label above, but it supplies the window. Span times use the source recording timeline, so
+        # this task's span sits inside the window's span.
+        dataset.add_task(
+            task=ClassificationTask(
+                inputs=(record2,),
+                targets=("onset",),
+                label_set=_EVENT,
+                scope=TimeInterval.seconds(0.5, 0.75, time_series=(window,)),
+            ),
+        )
+        return dataset
+
+
+CONNECTOR = HelloWorldConnector
