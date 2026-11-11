@@ -1,6 +1,6 @@
 [project]
 name = "masquare-timenet-connectors"
-version = "0.15.0"
+version = "0.16.0.dev0"
 description = "Dataset connectors for TimeNet: dataset-specific logic to fetch and convert sources into the TimeF format."
 readme = "README.md"
 license = "MIT"
