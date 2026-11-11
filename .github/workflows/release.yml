@@ -395,7 +395,7 @@ jobs:
           ls -l dist
       - name: Publish to PyPI
         # --check-url skips files the index already has, so a re-run after a partial upload resumes.
-        run: echo "sandbox: PyPI upload skipped"
+        run: echo "sandbox PyPI upload skipped"
       - name: Summary
         run: |
           for whl in dist/*.whl; do
