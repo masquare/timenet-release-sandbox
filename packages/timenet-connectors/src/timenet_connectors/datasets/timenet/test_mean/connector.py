@@ -94,3 +94,4 @@ CONNECTOR = TestMeanConnector
 # core
 # own
 # own 2
+# chain
