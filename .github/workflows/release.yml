@@ -134,9 +134,9 @@ jobs:
           connectors=packages/timenet-connectors/pyproject.toml
           if [ "$PACKAGE" = both ]; then
             # Connectors needs the masquare-timenet release that ships with it.
-            masquare-timenet=$(uv version --package masquare-timenet --short)
-            sed -i -E "s/\"masquare-timenet\[build\]>=[^\"]*\"/\"masquare-timenet[build]>=$masquare-timenet\"/" "$connectors"
-            grep -q "\"masquare-timenet\[build\]>=$masquare-timenet\"" "$connectors"
+            timenet_version=$(uv version --package masquare-timenet --short)
+            sed -i -E "s/\"masquare-timenet\[build\]>=[^\"]*\"/\"masquare-timenet[build]>=$timenet_version\"/" "$connectors"
+            grep -q "\"masquare-timenet\[build\]>=$timenet_version\"" "$connectors"
           else
             # Warn when the other package has changes this release leaves out. Skip the commits
             # cliff.toml skips too: release and development-version commits.
