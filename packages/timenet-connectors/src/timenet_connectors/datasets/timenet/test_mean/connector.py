@@ -93,3 +93,4 @@ class TestMeanConnector(BaseConnector[None]):
 CONNECTOR = TestMeanConnector
 # core
 # own
+# own 2
