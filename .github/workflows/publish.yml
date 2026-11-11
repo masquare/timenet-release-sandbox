@@ -18,10 +18,10 @@ on:
         type: choice
         options:
           - both
-          - timenet
-          - timenet-connectors
+          - masquare-timenet
+          - masquare-timenet-connectors
       ref:
-        description: Release tag to build, for example timenet-v0.12.0. Leave empty to build the branch above.
+        description: Release tag to build, for example masquare-timenet-v0.12.0. Leave empty to build the branch above.
         required: false
         type: string
 
@@ -62,7 +62,7 @@ jobs:
         env:
           REF: ${{ inputs.ref }}
         run: |
-          if ! [[ "$REF" =~ ^(timenet|timenet-connectors)-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! git merge-base --is-ancestor HEAD origin/main; then
+          if ! [[ "$REF" =~ ^(masquare-timenet|masquare-timenet-connectors)-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! git merge-base --is-ancestor HEAD origin/main; then
             echo "::error title=Invalid ref::Build only a <package>-vX.Y.Z tag on main, not '$REF'."
             exit 1
           fi
@@ -81,7 +81,7 @@ jobs:
             fi
             exit 0
           fi
-          if [ "$PACKAGE" = both ]; then packages="timenet timenet-connectors"; else packages=$PACKAGE; fi
+          if [ "$PACKAGE" = both ]; then packages="masquare-timenet masquare-timenet-connectors"; else packages=$PACKAGE; fi
           for package in $packages; do
             version=$(uv version --package "$package" --short)
             tag="$package-v$version"
@@ -101,13 +101,14 @@ jobs:
       - name: Smoke test built artifacts
         # Import each built wheel and sdist in an isolated environment to catch missing files or
         # broken metadata before uploading. Each artifact must also report this commit, clean, as
-        # the code it was built from. timenet-connectors depends on timenet, so hand it the
-        # wheel we just built when it is present (a `both` run); otherwise timenet resolves from the
+        # the code it was built from. masquare-timenet-connectors depends on masquare-timenet, so hand it the
+        # wheel we just built when it is present (a `both` run); otherwise masquare-timenet resolves from the
         # default index, which requires it to be published already.
         run: |
           set -euo pipefail
+          export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/
           shopt -s nullglob
-          timenet_whl=(dist/timenet-*.whl)
+          timenet_whl=(dist/masquare_timenet-*.whl)
           # The checked-out commit: the release tag's commit, or GITHUB_SHA without a ref.
           expected_sha=$(git rev-parse HEAD)
           smoke() {
@@ -128,10 +129,10 @@ jobs:
           }
           for artifact in dist/*; do
             case "$artifact" in
-              dist/timenet-*.whl | dist/timenet-*.tar.gz)
-                smoke timenet timenet "$artifact" ;;
-              dist/timenet_connectors-*.whl | dist/timenet_connectors-*.tar.gz)
-                smoke timenet_connectors timenet-connectors ${timenet_whl[@]+"${timenet_whl[@]}"} "$artifact" ;;
+              dist/masquare_timenet-*.whl | dist/masquare_timenet-*.tar.gz)
+                smoke timenet masquare-timenet "$artifact" ;;
+              dist/masquare_timenet_connectors-*.whl | dist/masquare_timenet_connectors-*.tar.gz)
+                smoke timenet_connectors masquare-timenet-connectors ${timenet_whl[@]+"${timenet_whl[@]}"} "$artifact" ;;
             esac
           done
       - name: Publish

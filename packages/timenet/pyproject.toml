@@ -1,5 +1,5 @@
 [project]
-name = "timenet"
+name = "masquare-timenet"
 version = "0.11.0"
 description = "TimeNet is infrastructure for registering, querying, downloading, converting, and exploring time series datasets in a shared TimeF format."
 readme = "README.md"
@@ -72,7 +72,7 @@ s3 = [
     "boto3>=1.34",
 ]
 all = [
-    "timenet[cli,torch,build,zarr,s3]",
+    "masquare-timenet[cli,torch,build,zarr,s3]",
 ]
 
 [project.scripts]
@@ -90,3 +90,6 @@ explicit = true
 [build-system]
 requires = ["uv_build>=0.10.10,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "timenet"

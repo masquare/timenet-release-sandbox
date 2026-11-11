@@ -1,6 +1,6 @@
 name: Release
 
-# Releases timenet, timenet-connectors, or both. Each package has its own version and its own tag,
+# Releases masquare-timenet, masquare-timenet-connectors, or both. Each package has its own version and its own tag,
 # <package>-vX.Y.Z, and its notes list the commits that touched its folder under packages/.
 #   1. Run this workflow on main and pick the package. It opens a release PR that sets the version
 #      and shows the notes.
@@ -10,7 +10,7 @@ name: Release
 #      released packages to their next development version, X.(Y+1).0.dev0.
 #   3. Approve the TestPyPI run and check the result, approve the PyPI run, then merge the
 #      development-version PR.
-# Releasing both raises the timenet floor of timenet-connectors to the new timenet version.
+# Releasing both raises the masquare-timenet floor of masquare-timenet-connectors to the new masquare-timenet version.
 # Releasing one package alone keeps the floor. The release PR warns when the other package has
 # changes that the release leaves out.
 # The version is fixed when the release PR opens. If main gets changes that need a bigger bump
@@ -33,8 +33,8 @@ on:
         type: choice
         options:
           - both
-          - timenet
-          - timenet-connectors
+          - masquare-timenet
+          - masquare-timenet-connectors
       version:
         description: Version to release, for example 0.12.0. Leave empty to compute it from the commits.
         required: false
@@ -56,7 +56,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || (github.event.pull_request.merged == true
           && github.event.pull_request.head.repo.full_name == github.repository
-          && startsWith(github.event.pull_request.head.ref, 'release/timenet'))
+          && startsWith(github.event.pull_request.head.ref, 'release/masquare-timenet'))
     runs-on: ubuntu-latest
     steps:
       - name: Allow only admins and maintainers
@@ -102,10 +102,10 @@ jobs:
           # The legacy vX.Y.Z tags count as the last release of both packages.
           cliff() {
             local package=$1; shift
-            uvx "$GIT_CLIFF" --include-path "packages/$package/**" \
+            uvx "$GIT_CLIFF" --include-path "packages/${package#masquare-}/**" \
               --tag-pattern "^($package-)?v[0-9]+\.[0-9]+\.[0-9]+$" "$@"
           }
-          if [ "$PACKAGE" = both ]; then packages="timenet timenet-connectors"; else packages=$PACKAGE; fi
+          if [ "$PACKAGE" = both ]; then packages="masquare-timenet masquare-timenet-connectors"; else packages=$PACKAGE; fi
           titles=() tags=()
           : > "$RUNNER_TEMP/notes.md"
           for package in $packages; do
@@ -133,23 +133,23 @@ jobs:
           done
           connectors=packages/timenet-connectors/pyproject.toml
           if [ "$PACKAGE" = both ]; then
-            # Connectors needs the timenet release that ships with it.
-            timenet=$(uv version --package timenet --short)
-            sed -i -E "s/\"timenet\[build\]>=[^\"]*\"/\"timenet[build]>=$timenet\"/" "$connectors"
-            grep -q "\"timenet\[build\]>=$timenet\"" "$connectors"
+            # Connectors needs the masquare-timenet release that ships with it.
+            masquare-timenet=$(uv version --package masquare-timenet --short)
+            sed -i -E "s/\"masquare-timenet\[build\]>=[^\"]*\"/\"masquare-timenet[build]>=$masquare-timenet\"/" "$connectors"
+            grep -q "\"masquare-timenet\[build\]>=$masquare-timenet\"" "$connectors"
           else
             # Warn when the other package has changes this release leaves out. Skip the commits
             # cliff.toml skips too: release and development-version commits.
-            if [ "$PACKAGE" = timenet ]; then other=timenet-connectors; else other=timenet; fi
+            if [ "$PACKAGE" = masquare-timenet ]; then other=masquare-timenet-connectors; else other=masquare-timenet; fi
             last=$(git describe --tags --abbrev=0 --match "$other-v*" --match 'v*')
-            unreleased=$(git log --format=%s "$last..HEAD" -- "packages/$other" \
+            unreleased=$(git log --format=%s "$last..HEAD" -- "packages/${other#masquare-}" \
               | grep -cvE '^chore(\(release\)|: start .* development)' || true)
             if [ "$unreleased" -gt 0 ]; then
-              floor=$(grep -o '"timenet\[build\]>=[^"]*"' "$connectors")
+              floor=$(grep -o '"masquare-timenet\[build\]>=[^"]*"' "$connectors")
               {
                 echo "> [!WARNING]"
                 echo "> $other has $unreleased commits since $last that this release leaves out, and"
-                echo "> timenet-connectors keeps $floor. If those commits go with the $PACKAGE changes,"
+                echo "> masquare-timenet-connectors keeps $floor. If those commits go with the $PACKAGE changes,"
                 echo "> release both instead."
                 echo
               } >> "$RUNNER_TEMP/notes.md"
@@ -192,7 +192,7 @@ jobs:
       github.event_name == 'pull_request'
       && github.event.pull_request.merged == true
       && github.event.pull_request.head.repo.full_name == github.repository
-      && startsWith(github.event.pull_request.head.ref, 'release/timenet')
+      && startsWith(github.event.pull_request.head.ref, 'release/masquare-timenet')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -209,9 +209,9 @@ jobs:
         id: released
         run: |
           released=()
-          for package in timenet timenet-connectors; do
+          for package in masquare-timenet masquare-timenet-connectors; do
             version=$(uv version --package "$package" --short)
-            before=$(git show "HEAD^:packages/$package/pyproject.toml" | sed -n -E 's/^version = "(.*)"$/\1/p')
+            before=$(git show "HEAD^:packages/${package#masquare-}/pyproject.toml" | sed -n -E 's/^version = "(.*)"$/\1/p')
             if [ "$version" = "$before" ]; then continue; fi
             if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::error title=Invalid version::$package is at $version, not X.Y.Z."
@@ -231,7 +231,7 @@ jobs:
         run: |
           cliff() {
             local package=$1; shift
-            uvx "$GIT_CLIFF" --include-path "packages/$package/**" \
+            uvx "$GIT_CLIFF" --include-path "packages/${package#masquare-}/**" \
               --tag-pattern "^($package-)?v[0-9]+\.[0-9]+\.[0-9]+$" "$@"
           }
           git config user.name "github-actions[bot]"
