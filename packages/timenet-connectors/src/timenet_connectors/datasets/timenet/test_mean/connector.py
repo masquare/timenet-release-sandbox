@@ -96,3 +96,4 @@ CONNECTOR = TestMeanConnector
 # own 2
 # chain
 # assets
+# approval
