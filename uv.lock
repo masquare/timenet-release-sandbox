@@ -1610,7 +1610,7 @@ wheels = [
 
 [[package]]
 name = "masquare-timenet"
-version = "0.13.0.dev0"
+version = "0.13.0"
 source = { editable = "packages/timenet" }
 dependencies = [
     { name = "cachetools" },
