@@ -45,8 +45,7 @@ on:
         description: Version to release, for example 0.12.0. Leave empty to compute it from the commits.
         required: false
         type: string
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
 
 permissions:
@@ -60,15 +59,13 @@ jobs:
   authorize:
     if: >-
       github.event_name == 'workflow_dispatch'
-      || (github.event.pull_request.merged == true
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && startsWith(github.event.pull_request.head.ref, 'release/masquare-timenet'))
+      || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(release):'))
     runs-on: ubuntu-latest
     steps:
       - name: Allow only admins and maintainers
         env:
           GH_TOKEN: ${{ github.token }}
-          # The user who started the run, merged the release PR, or re-ran a job.
+          # The user who started the run, pushed the merged release PR, or re-ran a job.
           ACTOR: ${{ github.triggering_actor }}
         run: |
           role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .role_name)
@@ -200,10 +197,7 @@ jobs:
   release:
     needs: authorize
     if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.merged == true
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && startsWith(github.event.pull_request.head.ref, 'release/masquare-timenet')
+      github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -212,7 +206,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v8.2.0
       - name: Find the packages this PR released
