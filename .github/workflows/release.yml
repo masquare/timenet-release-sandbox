@@ -9,10 +9,11 @@ name: Release
 #   2. Merge the release PR. For every package whose version the PR changed, this builds and
 #      smoke-tests the wheel and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release
 #      with the two files attached. It starts a TestPyPI run of publish.yml, which waits for
-#      approval in the pypi environment, and opens a PR that moves the released packages to their
-#      next development version, X.(Y+1).0.dev0.
+#      approval in the pypi environment.
 #   3. Approve the TestPyPI run. Once it has uploaded, it starts the PyPI run, which waits for
-#      approval too. Check TestPyPI, approve the PyPI run, then merge the development-version PR.
+#      approval too. Check TestPyPI, then approve the PyPI run. Once PyPI has the release, that run
+#      opens a PR that moves the released packages to their next development version,
+#      X.(Y+1).0.dev0. Merge it.
 # Releasing both raises the masquare-timenet floor of masquare-timenet-connectors to the new masquare-timenet version.
 # Releasing one package alone keeps the floor. The release PR warns when the other package has
 # changes that the release leaves out.
@@ -205,8 +206,6 @@ jobs:
     permissions:
       contents: write
       actions: write
-    outputs:
-      released: ${{ steps.released.outputs.released }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -248,8 +247,8 @@ jobs:
         # default index, which requires it to be published already.
         run: |
           set -euo pipefail
-          shopt -s nullglob
           if curl -sfo /dev/null https://test.pypi.org/simple/masquare-timenet/; then export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/; fi
+          shopt -s nullglob
           timenet_whl=(dist/masquare_timenet-*.whl)
           # The merge commit that the tags point at.
           expected_sha=$(git rev-parse HEAD)
@@ -341,45 +340,3 @@ jobs:
             exit 0
           fi
           gh workflow run publish.yml --ref main -f target=TestPyPI -f package="$package" -f ref="$ref"
-
-  next-development-version:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-          token: ${{ steps.app-token.outputs.token }}
-      - uses: astral-sh/setup-uv@v8.2.0
-      - name: Open the development version PR
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASED: ${{ needs.release.outputs.released }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          names=()
-          for entry in $RELEASED; do
-            package=${entry%=*}
-            uv version --package "$package" --bump minor --bump dev=0 --frozen
-            next=$(uv version --package "$package" --short)
-            names+=("$package ${next%.dev0}")
-          done
-          uv lock
-          title="chore: start $(IFS=,; echo "${names[*]}" | sed 's/,/ and /g') development"
-          branch="chore/start-development-after-${HEAD_REF#release/}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git commit -am "$title"
-          git push --force origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --base main --head "$branch" --title "$title" \
-              --body "Moves the released packages to their next development version ($RELEASED released), so builds from main are not mistaken for a release."
-          fi

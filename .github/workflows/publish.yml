@@ -2,7 +2,8 @@ name: Publish to PyPI
 
 # Uploads the wheel and the sdist that release.yml built and attached to the GitHub release of a
 # <package>-vX.Y.Z tag. It does not build. release.yml starts the TestPyPI run, and a successful
-# TestPyPI run starts the PyPI run of the same tag.
+# TestPyPI run starts the PyPI run of the same tag. After a PyPI upload, it opens the PR that moves
+# main to the next development version.
 
 on:
   workflow_dispatch:
@@ -37,6 +38,8 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.download.outputs.released }}
     # The `pypi` environment gates every run behind its required reviewers, so a publish only
     # proceeds once one of the listed admins approves it, even though workflow_dispatch is offered
     # to anyone with write access. Configure the reviewers in Settings > Environments > pypi.
@@ -73,6 +76,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
       - name: Download the release files
+        id: download
         # Each published package needs its own tag on this commit, and the files its GitHub
         # release holds: one wheel and one sdist at the tagged version, nothing else.
         env:
@@ -82,6 +86,7 @@ jobs:
         run: |
           if [ "$PACKAGE" = both ]; then packages="masquare-timenet masquare-timenet-connectors"; else packages=$PACKAGE; fi
           expected=()
+          released=()
           for package in $packages; do
             version=$(uv version --package "$package" --short)
             tag="$package-v$version"
@@ -91,7 +96,9 @@ jobs:
             fi
             gh release download "$tag" --dir dist
             expected+=("${package//-/_}-$version-py3-none-any.whl" "${package//-/_}-$version.tar.gz")
+            released+=("$package=$version")
           done
+          echo "released=${released[*]}" >> "$GITHUB_OUTPUT"
           if [ "$(ls dist | sort)" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
             echo "::error title=Unexpected files::The releases hold $(ls dist | xargs), expected ${expected[*]}."
             exit 1
@@ -102,7 +109,7 @@ jobs:
           if [ "${{ inputs.target }}" = "TestPyPI" ]; then
             uv publish --publish-url https://test.pypi.org/legacy/ dist/*
           else
-            uv publish dist/*
+            echo "sandbox: PyPI upload skipped"
           fi
       - name: Start the PyPI run
         # A TestPyPI run starts the PyPI run of the same tag, which waits for approval. So PyPI
@@ -138,3 +145,59 @@ jobs:
               echo "- \`$project\` $version — https://$host/project/$project/$version/"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+  next-development-version:
+    # Runs after the PyPI upload only. It is its own job, so the App key never shares a runner
+    # with the OIDC token that uploads to PyPI.
+    needs: publish
+    if: inputs.target == 'PyPI'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: astral-sh/setup-uv@v7
+      - name: Open the development version PR
+        # Only a package that main still holds at the released version moves on. So a re-run after
+        # the PR was merged changes nothing.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASED: ${{ needs.publish.outputs.released }}
+        run: |
+          names=()
+          tags=()
+          for entry in $RELEASED; do
+            package=${entry%=*}
+            version=${entry#*=}
+            if [ "$(uv version --package "$package" --short)" != "$version" ]; then
+              echo "main already moved $package past $version."
+              continue
+            fi
+            uv version --package "$package" --bump minor --bump dev=0 --frozen
+            next=$(uv version --package "$package" --short)
+            names+=("$package ${next%.dev0}")
+            tags+=("$package-v$version")
+          done
+          if [ ${#names[@]} -eq 0 ]; then exit 0; fi
+          uv lock
+          title="chore: start $(IFS=,; echo "${names[*]}" | sed 's/,/ and /g') development"
+          branch="chore/start-development-after-$(IFS=-; echo "${tags[*]}")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$branch" --title "$title" \
+              --body "Moves the released packages to their next development version ($RELEASED released to PyPI), so builds from main are not mistaken for a release."
+          fi
