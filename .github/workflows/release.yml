@@ -6,20 +6,22 @@ name: Release
 # shared connector code (.github/scripts/connector_notes.py).
 #   1. Run this workflow on main and pick the package. It opens a release PR that sets the version
 #      and shows the notes.
-#   2. Merge the release PR. For every package whose version the PR changed, this builds and
-#      smoke-tests the wheel and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release
-#      with the two files attached. It starts a TestPyPI run of publish.yml, which waits for
-#      approval in the pypi environment.
-#   3. Approve the TestPyPI run. Once it has uploaded, it starts the PyPI run, which waits for
-#      approval too. Check TestPyPI, then approve the PyPI run. Once PyPI has the release, that run
-#      opens a PR that moves the released packages to their next development version,
-#      X.(Y+1).0.dev0. Merge it.
+#   2. Merge the release PR. The rest runs in this workflow, one job after the other:
+#        release: for every package whose version the PR changed, builds and smoke-tests the wheel
+#          and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release with the two files
+#          attached.
+#        publish-testpypi: waits for approval in the pypi environment, then uploads those files.
+#        publish-pypi: waits for approval too, then uploads the same files.
+#        next-development-version: opens a PR that moves the released packages to their next
+#          development version, X.(Y+1).0.dev0. Merge it.
+#      The publish jobs upload the files the release holds. They do not build.
 # Releasing both raises the masquare-timenet floor of masquare-timenet-connectors to the new masquare-timenet version.
 # Releasing one package alone keeps the floor. The release PR warns when the other package has
 # changes that the release leaves out.
 # The version is fixed when the release PR opens. If main gets changes that need a bigger bump
 # before you merge it, close the release PR and run this workflow again.
-# Every job can be re-run: steps that already happened are skipped.
+# Every job can be re-run: steps that already happened are skipped, and an upload skips the files
+# the index already has.
 # Only admins and maintainers can start a release, merge the release PR, or re-run a job. If
 # someone else merges the release PR, nothing is tagged until an admin or maintainer re-runs it.
 #
@@ -181,9 +183,9 @@ jobs:
           git commit -am "$TITLE"
           git push --force origin "$BRANCH"
           {
-            echo "Merging this PR tags each package below, creates its GitHub release with these notes,"
-            echo "and starts the TestPyPI publish run for approval. A successful TestPyPI run starts the"
-            echo "PyPI run. To change the notes, edit them in the GitHub release after it is created."
+            echo "Merging this PR tags each package below and creates its GitHub release with these notes."
+            echo "The same run then waits for your approval to upload to TestPyPI, and again for PyPI."
+            echo "To change the notes, edit them in the GitHub release after it is created."
             echo
             echo "---"
             echo
@@ -205,7 +207,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
+    outputs:
+      released: ${{ steps.released.outputs.released }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -320,23 +323,140 @@ jobs:
               fi
             done
           done
-      - name: Start the TestPyPI publish run
+
+  publish-testpypi:
+    # Waits for approval in the pypi environment. Downloads the files the release job attached, so nothing is built here.
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      # Mint the OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
+      id-token: write
+      contents: read
+    steps:
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Download the release files
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASED: ${{ steps.released.outputs.released }}
+          RELEASED: ${{ needs.release.outputs.released }}
         run: |
-          read -r -a released <<< "$RELEASED"
-          first=${released[0]}
-          package=${first%=*}
-          if [ ${#released[@]} -eq 2 ]; then package=both; fi
-          # Both tags of a release point at the same commit, so either one builds both packages.
-          ref="${first%=*}-v${first#*=}"
-          # A re-run: skip the publish run if this job already started it. Its name comes from
-          # publish.yml's run-name. A successful TestPyPI run starts the PyPI run.
-          name="Publish $package $ref to TestPyPI"
-          if gh run list --workflow publish.yml --event workflow_dispatch --limit 100 --json displayTitle \
-              --jq '.[].displayTitle' | grep -qxF "$name"; then
-            echo "Skipping '$name': it was already started."
-            exit 0
+          expected=()
+          for entry in $RELEASED; do
+            package=${entry%=*} version=${entry#*=}
+            gh release download "$package-v$version" --dir dist
+            expected+=("${package//-/_}-$version-py3-none-any.whl" "${package//-/_}-$version.tar.gz")
+          done
+          if [ "$(ls dist | sort)" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
+            echo "::error title=Unexpected files::The releases hold $(ls dist | xargs), expected ${expected[*]}."
+            exit 1
           fi
-          gh workflow run publish.yml --ref main -f target=TestPyPI -f package="$package" -f ref="$ref"
+          ls -l dist
+      - name: Publish to TestPyPI
+        # --check-url skips files the index already has, so a re-run after a partial upload resumes.
+        run: uv publish --publish-url https://test.pypi.org/legacy/ --check-url https://test.pypi.org/simple/ dist/*
+      - name: Summary
+        run: |
+          for whl in dist/*.whl; do
+            base=$(basename "$whl")
+            project=${base%%-*}
+            project=${project//_/-}
+            rest=${base#*-}
+            echo "- \`$project\` ${rest%%-*} on TestPyPI: https://test.pypi.org/project/$project/${rest%%-*}/"
+          done >> "$GITHUB_STEP_SUMMARY"
+
+  publish-pypi:
+    # Starts only after TestPyPI took the same files, and waits for approval in the pypi environment too.
+    needs: [release, publish-testpypi]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      # Mint the OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
+      id-token: write
+      contents: read
+    steps:
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Download the release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          expected=()
+          for entry in $RELEASED; do
+            package=${entry%=*} version=${entry#*=}
+            gh release download "$package-v$version" --dir dist
+            expected+=("${package//-/_}-$version-py3-none-any.whl" "${package//-/_}-$version.tar.gz")
+          done
+          if [ "$(ls dist | sort)" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
+            echo "::error title=Unexpected files::The releases hold $(ls dist | xargs), expected ${expected[*]}."
+            exit 1
+          fi
+          ls -l dist
+      - name: Publish to PyPI
+        # --check-url skips files the index already has, so a re-run after a partial upload resumes.
+        run: echo "sandbox: PyPI upload skipped"
+      - name: Summary
+        run: |
+          for whl in dist/*.whl; do
+            base=$(basename "$whl")
+            project=${base%%-*}
+            project=${project//_/-}
+            rest=${base#*-}
+            echo "- \`$project\` ${rest%%-*} on PyPI: https://pypi.org/project/$project/${rest%%-*}/"
+          done >> "$GITHUB_STEP_SUMMARY"
+
+  next-development-version:
+    # Runs after the PyPI upload only. It is its own job, so the App key never shares a runner
+    # with the OIDC token that uploads to PyPI.
+    needs: [release, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Open the development version PR
+        # Only a package that main still holds at the released version moves on. So a re-run after
+        # the PR was merged changes nothing.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          names=()
+          tags=()
+          for entry in $RELEASED; do
+            package=${entry%=*}
+            version=${entry#*=}
+            if [ "$(uv version --package "$package" --short)" != "$version" ]; then
+              echo "main already moved $package past $version."
+              continue
+            fi
+            uv version --package "$package" --bump minor --bump dev=0 --frozen
+            next=$(uv version --package "$package" --short)
+            names+=("$package ${next%.dev0}")
+            tags+=("$package-v$version")
+          done
+          if [ ${#names[@]} -eq 0 ]; then exit 0; fi
+          uv lock
+          title="chore: start $(IFS=,; echo "${names[*]}" | sed 's/,/ and /g') development"
+          branch="chore/start-development-after-$(IFS=-; echo "${tags[*]}")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$branch" --title "$title" \
+              --body "Moves the released packages to their next development version ($RELEASED released to PyPI), so builds from main are not mistaken for a release."
+          fi
