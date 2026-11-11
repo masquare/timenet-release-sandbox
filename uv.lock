@@ -1683,7 +1683,7 @@ provides-extras = ["cli", "torch", "build", "zarr", "s3", "all"]
 
 [[package]]
 name = "masquare-timenet-connectors"
-version = "0.13.0.dev0"
+version = "0.13.0"
 source = { editable = "packages/timenet-connectors" }
 dependencies = [
     { name = "aiofiles" },
