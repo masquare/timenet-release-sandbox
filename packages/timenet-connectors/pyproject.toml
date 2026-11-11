@@ -1,5 +1,5 @@
 [project]
-name = "timenet-connectors"
+name = "masquare-timenet-connectors"
 version = "0.11.0"
 description = "Dataset connectors for TimeNet: dataset-specific logic to fetch and convert sources into the TimeF format."
 readme = "README.md"
@@ -29,7 +29,7 @@ dependencies = [
     # [build] pulls PyYAML: connectors load and validate their card YAML at build time.
     # Fold assignments are persisted data; review dataset versions before upgrading.
     "scikit-learn==1.9.1",
-    "timenet[build]>=0.11.0",
+    "masquare-timenet[build]>=0.11.0",
     "typer>=0.12",
 ]
 
@@ -48,9 +48,10 @@ connectors = "timenet_connectors.builder.backend:ConnectorBuilder"
 [tool.uv.sources]
 # Dev-time override so the workspace resolves timenet locally. This is uv-only
 # and never reaches published metadata; Requires-Dist comes from the floor above.
-timenet = { workspace = true }
+masquare-timenet = { workspace = true }
 
 [tool.uv.build-backend]
+module-name = "timenet_connectors"
 # Connector tests live beside their connector (datasets/<org>/<name>/tests/, incl. binary fixtures).
 # Keep them out of the built distributions.
 source-exclude = ["**/tests"]

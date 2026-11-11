@@ -149,7 +149,7 @@ class InstalledDistribution:
                 return EditableInstall(self.name, project_directory)
         # An install from an index has no direct_url.json. A path install that is not editable
         # copied the package, so the live checkout can differ from the code that runs.
-        module = self.name.replace("-", "_")
+        module = self.name.removeprefix("masquare-").replace("-", "_")
         build_info = self._distribution.locate_file(f"{module}/{WheelInstall.BUILD_INFO_FILE}")
         return WheelInstall(self.name, Path(str(build_info)))
 
@@ -242,8 +242,8 @@ class TimeNetSnapshot(Snapshot):
     def read(cls) -> Self:
         """Read the commit of each installed TimeNet package. Raises ``TimeNetBuildError`` if one is unknown."""
         return cls(
-            timenet=PackageSnapshot.read("timenet"),
-            timenet_connectors=PackageSnapshot.read_if_installed("timenet-connectors"),
+            timenet=PackageSnapshot.read("masquare-timenet"),
+            timenet_connectors=PackageSnapshot.read_if_installed("masquare-timenet-connectors"),
         )
 
     @classmethod

@@ -1,8 +1,8 @@
 # Release notes for TimeNet, generated from the Conventional Commit subjects that squash merges
-# leave on main. Used by .github/workflows/release.yml, once per package. Preview the next timenet
-# release locally with (use timenet-connectors for the other package):
+# leave on main. Used by .github/workflows/release.yml, once per package. Preview the next masquare-timenet
+# release locally with (use masquare-timenet-connectors for the other package):
 #   uvx git-cliff==2.14.2 --include-path 'packages/timenet/**' \
-#     --tag-pattern '^(timenet-)?v[0-9]+\.[0-9]+\.[0-9]+$' --unreleased --bump --strip header
+#     --tag-pattern '^(masquare-timenet-)?v[0-9]+\.[0-9]+\.[0-9]+$' --unreleased --bump --strip header
 
 [changelog]
 header = ""
@@ -13,7 +13,7 @@ body = """
 {{ commit.message | split(pat="\n") | first | trim | upper_first }}
 {%- endmacro -%}
 {% if version and version is containing("-v") %}{% set package = version | split(pat="-v") | first %}{% set v = version | split(pat="-v") | last %}
-[![{{ package }} {{ v }}](https://img.shields.io/badge/{{ package | replace(from="-", to="--") }}-{{ v }}-blue?logo=pypi&logoColor=white)](https://pypi.org/project/{{ package }}/{{ v }}/)
+[![{{ package }} {{ v }}](https://img.shields.io/badge/{{ package | replace(from="-", to="--") }}-{{ v }}-blue?logo=pypi&logoColor=white)](https://test.pypi.org/project/{{ package }}/{{ v }}/)
 {% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim }}
@@ -34,7 +34,7 @@ filter_unconventional = false
 split_commits = false
 # Only release tags count. This skips the registry-dev/... and backup/... tags. release.yml narrows
 # it to one package with --tag-pattern; the legacy vX.Y.Z tags count for both packages.
-tag_pattern = "^((timenet|timenet-connectors)-)?v[0-9]+\\.[0-9]+\\.[0-9]+$"
+tag_pattern = "^((masquare-timenet|masquare-timenet-connectors)-)?v[0-9]+\\.[0-9]+\\.[0-9]+$"
 topo_order = false
 sort_commits = "newest"
 protect_breaking_commits = true

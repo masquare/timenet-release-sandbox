@@ -148,7 +148,7 @@ def timenet_user_agent() -> str:
         The User-Agent string; ``timenet/0+unknown`` if the package metadata is unavailable.
     """
     try:
-        version = importlib.metadata.version("timenet")
+        version = importlib.metadata.version("masquare-timenet")
     except importlib.metadata.PackageNotFoundError:
         version = "0+unknown"
     return f"timenet/{version}"
