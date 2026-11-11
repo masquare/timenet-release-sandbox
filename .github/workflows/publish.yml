@@ -106,7 +106,7 @@ jobs:
         # default index, which requires it to be published already.
         run: |
           set -euo pipefail
-          export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/
+          if curl -sfo /dev/null https://test.pypi.org/simple/masquare-timenet/; then export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/; fi
           shopt -s nullglob
           timenet_whl=(dist/masquare_timenet-*.whl)
           # The checked-out commit: the release tag's commit, or GITHUB_SHA without a ref.
