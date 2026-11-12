@@ -33,7 +33,6 @@ from typing import NoReturn
 from connector_notes import SKIP, badge, notes as connector_notes, repo
 from git import Repo
 from github import Auth, Github, GithubException, UnknownObjectException
-from github.PullRequest import PullRequest
 from github.Repository import Repository
 
 
@@ -121,23 +120,6 @@ def github() -> Repository:
     return Github(auth=Auth.Token(os.environ["GH_TOKEN"])).get_repo(os.environ["GITHUB_REPOSITORY"])
 
 
-def request_review(pull: PullRequest) -> None:
-    """Ask the people and teams in ``RELEASE_REVIEWERS`` to review a PR.
-
-    The variable lists comma separated GitHub logins and ``org/team`` names. When it is empty,
-    nobody is asked. A request GitHub refuses only warns.
-    """
-    names = [name.strip() for name in os.environ.get("RELEASE_REVIEWERS", "").split(",") if name.strip()]
-    if not names:
-        return
-    teams = [name.partition("/")[2] for name in names if "/" in name]
-    users = [name for name in names if "/" not in name]
-    try:
-        pull.create_review_request(reviewers=users, team_reviewers=teams)
-    except GithubException as error:
-        print(f"::warning title=Review request refused::{error.data}")
-
-
 def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bool = False) -> None:
     """Commit the working tree to ``branch``, push it, and open or update its PR against main.
 
@@ -158,8 +140,6 @@ def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bo
     open_prs = list(remote.get_pulls(state="open", head=f"{remote.owner.login}:{branch}"))
     pull = open_prs[0] if open_prs else remote.create_pull(title=title, body=body, head=branch, base="main")
     pull.edit(body=body)
-    if not open_prs:
-        request_review(pull)
     note = ""
     if auto_merge:
         try:

@@ -101,7 +101,6 @@ jobs:
       - name: Set the versions, write the notes and open the release PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_REVIEWERS: ${{ vars.RELEASE_REVIEWERS }}
           PACKAGE: ${{ inputs.package }}
           REQUESTED: ${{ inputs.version }}
         run: uv run .github/scripts/release.py prepare --package "$PACKAGE" ${REQUESTED:+--version "$REQUESTED"}
@@ -217,6 +216,5 @@ jobs:
         # the PR was merged changes nothing.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_REVIEWERS: ${{ vars.RELEASE_REVIEWERS }}
           RELEASED: ${{ needs.release.outputs.released }}
         run: uv run .github/scripts/release.py next-dev --released "$RELEASED"
