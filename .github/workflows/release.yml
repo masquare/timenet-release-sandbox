@@ -1,25 +1,32 @@
 name: Release
 
-# Releases masquare-timenet, masquare-timenet-connectors, or both, each with its own version and tag
+# Release masquare-timenet, masquare-timenet-connectors, or both. Each package has its own version and its own tag,
 # <package>-vX.Y.Z. The steps with logic are in .github/scripts/release.py.
-#   1. Run this workflow on main and pick the package. It opens a release PR that sets the versions.
-#      Its body holds the notes, between release-notes markers. Edit them there: the release uses
-#      the text it finds in the merged PR.
-#   2. Merge the release PR. The same workflow then builds and smoke-tests the files, tags and
-#      creates the GitHub releases, opens a PR for the next development version (merge it any
-#      time), and waits for approval in the pypi environment to upload to TestPyPI, and again to
-#      upload to PyPI. The uploads publish the built files and do not build.
-# Releasing both raises the masquare-timenet floor of masquare-timenet-connectors. A single-package release warns
-# when the other package has changes it leaves out. The version is fixed when the release PR opens.
-# If main needs a bigger bump before you merge it, close the PR and run the workflow again.
-# Only admins and maintainers can start a release, merge the release PR, or re-run a job. Every job
-# can be re-run: steps that already happened are skipped.
+#   1. Run this workflow on main and select the package. It opens a release PR that sets the
+#      versions. The PR body has the release notes between release-notes markers. Edit the notes
+#      there. The release uses the text in the merged PR.
+#   2. Merge the release PR. The same workflow then does these steps:
+#      - It builds and tests the wheel and the sdist of each package.
+#      - It creates the tag and the GitHub release.
+#      - It opens a PR for the next development version. You can merge this PR at any time.
+#      - It waits for your approval in the pypi environment, then uploads to TestPyPI.
+#      - It waits for your approval again, then uploads to PyPI.
+#      The upload steps send the built files. They do not build.
+# If you release both packages, the masquare-timenet floor of masquare-timenet-connectors goes up. If you release one
+# package, the release PR warns when the other package has changes that the release leaves out.
+# The release PR fixes the versions. If main needs a bigger version bump before you merge, close
+# the PR and run the workflow again.
+# Only admins and maintainers can start a release, merge the release PR, or re-run a job. You can
+# re-run each job. Steps that already happened do not run again.
 #
-# Needs a GitHub App with contents and pull-requests write access, installed on this repository,
-# with its id in the RELEASE_APP_ID variable and its key in the RELEASE_APP_PRIVATE_KEY secret.
-# PRs opened with GITHUB_TOKEN are blocked by the repository settings and would not run CI.
-# The development version PR merges itself once it has the approvals main requires, when the
-# repository allows auto-merge.
+# Prerequisites:
+# - A GitHub App with write access to contents and pull requests, installed on this repository.
+#   Set its id in the RELEASE_APP_ID variable and its key in the RELEASE_APP_PRIVATE_KEY secret.
+#   The repository settings block PRs from GITHUB_TOKEN, and those PRs do not start CI.
+# - A trusted publisher on PyPI and TestPyPI for each package: workflow release.yml, environment
+#   pypi.
+# - The repository setting "Allow auto-merge". With it, the development version PR merges when it
+#   has the approvals that main needs.
 
 on:
   workflow_dispatch:
@@ -56,7 +63,6 @@ jobs:
       - name: Allow only admins and maintainers
         env:
           GH_TOKEN: ${{ github.token }}
-          # The user who started the run, pushed the merged release PR, or re-ran a job.
           ACTOR: ${{ github.triggering_actor }}
         run: |
           role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .role_name)
@@ -96,8 +102,7 @@ jobs:
 
   release:
     needs: authorize
-    if: >-
-      github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(release):')
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -114,7 +119,6 @@ jobs:
         id: released
         run: uv run .github/scripts/release.py released
       - name: Build
-        # build_dists.py records the commit inside each package, so a build can name its code.
         env:
           RELEASED: ${{ steps.released.outputs.released }}
         run: |
@@ -122,7 +126,6 @@ jobs:
             uv run scripts/build_dists.py --package "${entry%=*}"
           done
       - name: Smoke test built artifacts
-        # Import each artifact in an isolated environment, and check it records this commit.
         run: |
           if curl -sfo /dev/null https://test.pypi.org/simple/masquare-timenet/; then export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/; fi
           uv run .github/scripts/release.py smoke
@@ -132,21 +135,20 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+          overwrite: true
       - name: Tag and create the GitHub releases
-        # Reads the notes from the merged release PR and attaches the files built above.
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASED: ${{ steps.released.outputs.released }}
         run: uv run .github/scripts/release.py github-release --released "$RELEASED"
 
   publish-testpypi:
-    # Waits for approval in the pypi environment. Uploads the files the release job built, nothing is built here.
+    # Wait for approval in the pypi environment. Upload the files that the release job built.
     needs: release
     runs-on: ubuntu-latest
     environment:
       name: pypi
     permissions:
-      # The OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
       id-token: write
     steps:
       - uses: astral-sh/setup-uv@v8.2.0
@@ -155,12 +157,11 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to TestPyPI
-        # --check-url skips files the index already has, so a re-run after a partial upload resumes.
         run: uv publish --publish-url https://test.pypi.org/legacy/ --check-url https://test.pypi.org/simple/ dist/*
 
   publish-pypi:
-    # Starts only after TestPyPI took the same files, and waits for approval in the pypi environment too.
-    needs: [release, publish-testpypi]
+    # Start after TestPyPI has the same files. Wait for approval in the pypi environment.
+    needs: publish-testpypi
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -173,13 +174,10 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI
-        # --check-url skips files the index already has, so a re-run after a partial upload resumes.
         run: echo "sandbox PyPI upload skipped"
 
   next-development-version:
-    # Runs right after the release, next to the publish jobs. The tag fixes the released version
-    # whether or not PyPI takes it. It is its own job, so the App key never shares a runner with the
-    # OIDC token that uploads to PyPI.
+    # Run after the release job, at the same time as the publish jobs.
     needs: release
     runs-on: ubuntu-latest
     steps:
@@ -196,8 +194,6 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
       - uses: astral-sh/setup-uv@v8.2.0
       - name: Open the development version PR
-        # Only a package that main still holds at the released version moves on. So a re-run after
-        # the PR was merged changes nothing.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASED: ${{ needs.release.outputs.released }}

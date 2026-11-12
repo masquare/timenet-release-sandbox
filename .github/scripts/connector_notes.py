@@ -5,24 +5,26 @@
 # [tool.ty.rules]
 # unresolved-import = "ignore"
 # ///
-"""Write the release notes of timenet-connectors between two refs, and the PyPI badge of a release.
+"""Write the release notes of timenet-connectors between two refs.
 
-The notes list the connectors that were added, changed or removed, and the changes to the shared
-connector code (the "framework"). Core changes that only touched connector files on the way are
-left out; the timenet notes list them.
+The notes list the connectors that were added, changed, or removed. They also list the changes to
+the shared connector code (the "framework"). They leave out core changes that only touched
+connector files on the way. The timenet notes list those changes.
 
-- A connector is a ``datasets/<org>/<name>/`` folder with a ``dataset.yaml`` card, the rule that
-  ``scripts/gen_dataset_docs.py`` uses. Connectors are matched by the card's ``dataset_id``, so a
-  moved folder that keeps its id is changed, and a new id is one removal and one addition.
-- An added connector cites the PR that added it, a removed one the PR that removed it. A changed
-  connector cites its connector PRs, and is left out when it has none.
-- The framework section lists the connector PRs outside ``datasets/``, breaking ones first.
-- A connector PR is a ``feat``, a ``fix`` or a breaking change that did not touch
-  ``packages/timenet``. A core PR edits connectors on the way, and the timenet notes list it.
+- A connector is a ``datasets/<org>/<name>/`` folder with a ``dataset.yaml`` card.
+  ``scripts/gen_dataset_docs.py`` uses the same rule. The ``dataset_id`` in the card identifies the
+  connector. A moved folder that keeps its id is a change. A new id is one removal and one addition.
+- An added connector names the PR that added it. A removed connector names the PR that removed it.
+  A changed connector names its connector PRs. A changed connector with no connector PR is not in
+  the notes.
+- The framework section lists the connector PRs outside ``datasets/``. Breaking changes come first.
+- A connector PR is a ``feat``, a ``fix``, or a breaking change that did not touch
+  ``packages/timenet``. A core PR also edits connectors on the way. The timenet notes list it.
 
-.github/scripts/release.py imports it.
+.github/scripts/release.py imports this module.
 """
 
+from functools import cache
 import re
 
 from git import Repo
@@ -30,12 +32,13 @@ from git import Repo
 
 PACKAGE = "packages/timenet-connectors"
 DATASETS = f"{PACKAGE}/src/timenet_connectors/datasets"
-# A squash-merged PR title: type(scope)!: description (#123).
+# The title of a squash-merged PR: type(scope)!: description (#123).
 SUBJECT = re.compile(r"^(?P<type>\w+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?: (?P<text>.+?)(?: \(#(?P<pr>\d+)\))?$")
-# The commits cliff.toml skips: release and development-version commits.
+# The commits that cliff.toml skips: release commits and development-version commits.
 SKIP = re.compile(r"^chore(\(release\)|: start .* development)")
 
 
+@cache
 def repo() -> Repo:
     """Open the repository around the current directory.
 
@@ -46,10 +49,11 @@ def repo() -> Repo:
 
 
 def commits(base: str, head: str, *paths: str) -> list[tuple[str, str]]:
-    """List the commits between ``base`` and ``head`` that touched ``paths``, oldest first.
+    """List the commits between ``base`` and ``head`` that touched ``paths``. The oldest is first.
 
     Returns:
-        ``(short hash, subject)`` pairs, without release and development-version commits.
+        ``(short hash, subject)`` pairs. Release commits and development-version commits are not in
+        the list.
     """
     found = repo().iter_commits(f"{base}..{head}", paths=list(paths), reverse=True)
     pairs = [(commit.hexsha[:9], str(commit.summary)) for commit in found]
@@ -63,7 +67,7 @@ def notable(subject: str) -> bool:
 
 
 def link(sha: str, subject: str) -> str:
-    """Name the PR of a commit, which GitHub turns into a link, or the commit when it has no PR number.
+    """Name the PR of a commit. GitHub turns the name into a link. If there is no PR number, name the commit.
 
     Returns:
         ``#123`` or the short hash.
@@ -122,7 +126,7 @@ def connector_sections(base: str, head: str, core: set[str]) -> tuple[dict[str, 
 
 
 def framework_entries(base: str, head: str, skip: set[str]) -> list[str]:
-    """List the connector PRs outside ``datasets/``, breaking ones first.
+    """List the connector PRs outside ``datasets/``. Breaking changes come first.
 
     Returns:
         The entries, without the commits in ``skip``.
@@ -142,7 +146,7 @@ def notes(base: str, head: str) -> str:
     """Render the notes as markdown.
 
     Returns:
-        The markdown, or an empty string when nothing in the package changed.
+        The markdown, or an empty string if the package has no changes.
     """
     core = {sha for sha, _ in commits(base, head, "packages/timenet")}
     sections, added = connector_sections(base, head, core)
@@ -152,15 +156,3 @@ def notes(base: str, head: str) -> str:
         if entries:
             out += [f"### {title}", "", *entries, ""]
     return "\n".join(out)
-
-
-def badge(release: str) -> str:
-    """Render the PyPI badge of a ``<package>-vX.Y.Z`` tag.
-
-    Returns:
-        The markdown badge and a blank line.
-    """
-    package, version = release.rsplit("-v", 1)
-    label = package.replace("-", "--")
-    image = f"https://img.shields.io/badge/{label}-{version}-blue?logo=pypi&logoColor=white"
-    return f"[![{package} {version}]({image})](https://pypi.org/project/{package}/{version}/)\n\n"

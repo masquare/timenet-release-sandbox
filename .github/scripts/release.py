@@ -7,18 +7,18 @@
 # ///
 """The steps of .github/workflows/release.yml that need logic.
 
-- ``prepare`` sets the versions, writes the release notes and opens the release PR. The notes sit
-  in the PR body between ``<!-- release-notes:<package> -->`` markers, so they can be edited there.
-- ``released`` names the packages whose version the merged release PR changed.
-- ``smoke`` imports each built wheel and sdist in an isolated environment and checks that it records
-  the commit it was built from.
-- ``github-release`` tags each released package and creates its GitHub release with the notes it
-  reads from the merged PR, then attaches the files in ``dist/``.
-- ``next-dev`` opens the PR that moves the released packages to their next development version.
+- ``prepare`` sets the versions, writes the release notes, and opens the release PR. The PR body
+  has the notes between ``<!-- release-notes:<package> -->`` markers, so you can edit them there.
+- ``released`` finds the packages whose version the merged release PR changed.
+- ``smoke`` imports each built wheel and sdist in an isolated environment. It makes sure that each
+  file records the commit that it was built from.
+- ``github-release`` creates the tag and the GitHub release of each released package. It reads the
+  notes from the merged PR and attaches the files in ``dist/``.
+- ``next-dev`` opens the PR for the next development version of the released packages.
 
-GitHub goes through PyGithub and git through GitPython. Only ``uv`` and git-cliff, which have no
-Python API, run as subprocesses. ``--dry-run`` skips the push and the PR, but it edits the working
-tree, so run it in a scratch checkout::
+PyGithub makes the GitHub calls and GitPython makes the git calls. Only ``uv`` and git-cliff run as
+subprocesses, because they have no Python API. The option ``--dry-run`` does not push and does not
+open a PR. It changes the working tree, so run it in a scratch checkout::
 
     GIT_CLIFF=git-cliff==2.14.2 uv run .github/scripts/release.py prepare --package both --dry-run
 """
@@ -31,7 +31,7 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import] - the commands a
 import tomllib
 from typing import NoReturn
 
-from connector_notes import badge, commits, notes as connector_notes, repo
+from connector_notes import commits, notes as connector_notes, repo
 from git import Repo
 from github import Auth, Github, GithubException, UnknownObjectException
 from github.Repository import Repository
@@ -43,9 +43,10 @@ FLOOR = re.compile(r'"masquare-timenet\[build\]>=[^"]*"')
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 NOTES = re.compile(r"<!-- release-notes:(?P<package>[\w-]+) -->\n(?P<text>.*?)\n<!-- /release-notes -->", re.S)
 EXPLAIN = (
-    "Merging this PR tags each package below and creates its GitHub release. The release notes are\n"
-    "the text between the `release-notes` markers, so edit them here before you merge. The same run\n"
-    "then waits for your approval to upload to TestPyPI, and again for PyPI.\n"
+    "Merge this PR to tag each package below and to create its GitHub release. The release notes are\n"
+    "the text between the `release-notes` markers. Edit the notes here before you merge. The same run\n"
+    "then waits for your approval to upload to TestPyPI. It waits for your approval again to upload\n"
+    "to PyPI.\n"
 )
 
 
@@ -55,12 +56,15 @@ def fail(message: str) -> NoReturn:
 
 
 def run(*command: str) -> str:
-    """Run a tool and return its output, or raise when it fails.
+    """Run a tool and return its output. Stop the step with the output of the tool when it fails.
 
     Returns:
         The standard output without the trailing newline.
     """
-    return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()  # ruff: ignore[subprocess-without-shell-equals-true] - a fixed argument vector
+    result = subprocess.run(command, check=False, capture_output=True, text=True)  # ruff: ignore[subprocess-without-shell-equals-true] - a fixed argument vector
+    if result.returncode:
+        fail(f"{' '.join(command)} failed with exit code {result.returncode}:\n{result.stdout}{result.stderr}")
+    return result.stdout.strip()
 
 
 def version_of(package: str) -> str:
@@ -73,7 +77,7 @@ def version_of(package: str) -> str:
 
 
 def cliff(package: str, *args: str) -> str:
-    """Run git-cliff for one package. The legacy ``vX.Y.Z`` tags count as the last release of both.
+    """Run git-cliff for one package. The legacy ``vX.Y.Z`` tags are the last release of both packages.
 
     Returns:
         Its output.
@@ -85,7 +89,7 @@ def cliff(package: str, *args: str) -> str:
 
 
 def last_tag(git: Repo, package: str, ref: str = "HEAD") -> str:
-    """Find the newest release tag of a package that is reachable from ``ref``.
+    """Find the newest release tag of a package that ``ref`` can reach.
 
     Returns:
         The tag name.
@@ -94,7 +98,7 @@ def last_tag(git: Repo, package: str, ref: str = "HEAD") -> str:
 
 
 def append(variable: str, text: str) -> None:
-    """Append to the file GitHub names in ``variable``, or print when run outside a workflow."""
+    """Append text to the file that GitHub names in ``variable``. Print the text outside a workflow."""
     path = os.environ.get(variable)
     if path:
         with Path(path).open("a", encoding="utf-8") as file:
@@ -113,10 +117,11 @@ def github() -> Repository:
 
 
 def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bool = False) -> None:
-    """Commit the working tree to ``branch``, push it, and open or update its PR against main.
+    """Commit the working tree to ``branch``, push it, and open its PR against main.
 
-    With ``auto_merge`` the PR merges by itself once it has the approvals and checks main requires.
-    When the repository does not allow auto-merge, this only warns.
+    Update the PR if it is already open. With ``auto_merge``, the PR merges when it has the
+    approvals and checks that main needs. If the repository does not allow auto-merge, this only
+    warns.
     """
     if dry_run:
         print(f"{title}\n{branch}\n\n{body}")
@@ -139,14 +144,14 @@ def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bo
     if auto_merge:
         try:
             pull.enable_automerge(merge_method="SQUASH")
-            note = "\nIt merges by itself once it has the approvals main requires.\n"
+            note = "\nIt merges when it has the approvals that main needs.\n"
         except GithubException as error:
             print(f"::warning title=Auto-merge is off::{error.data}")
     append("GITHUB_STEP_SUMMARY", f"### {title}\n\n{pull.html_url}\n{note}")
 
 
 def next_version(git: Repo, package: str, requested: str) -> str:
-    """Pick the version to release, check that it is new, and write it to the package.
+    """Choose the version to release, make sure that it is new, and write it to the package.
 
     Returns:
         The version.
@@ -162,8 +167,19 @@ def next_version(git: Repo, package: str, requested: str) -> str:
     return version
 
 
+def badge(package: str, version: str) -> str:
+    """Render the PyPI badge of a release.
+
+    Returns:
+        The markdown badge and a blank line.
+    """
+    label = package.replace("-", "--")
+    image = f"https://img.shields.io/badge/{label}-{version}-blue?logo=pypi&logoColor=white"
+    return f"[![{package} {version}]({image})](https://pypi.org/project/{package}/{version}/)\n\n"
+
+
 def package_notes(git: Repo, package: str, version: str) -> str:
-    """Write the notes section of a release, with its editable part between markers.
+    """Write the notes section of a release. The part that you can edit is between markers.
 
     Returns:
         The markdown.
@@ -172,12 +188,12 @@ def package_notes(git: Repo, package: str, version: str) -> str:
         body = connector_notes(last_tag(git, package), "HEAD")
     else:
         body = cliff(package, "--unreleased", "--strip", "header")
-    notes = badge(f"{package}-v{version}") + body
+    notes = badge(package, version) + body
     return f"## {package} {version}\n\n<!-- release-notes:{package} -->\n{notes.strip()}\n<!-- /release-notes -->\n\n"
 
 
 def raise_floor() -> None:
-    """Make timenet-connectors require the timenet release that ships with it."""
+    """Make timenet-connectors require the timenet release that goes with it."""
     floor = f'"masquare-timenet[build]>={version_of("masquare-timenet")}"'
     path = Path(CONNECTORS)
     text = FLOOR.sub(floor, path.read_text(encoding="utf-8"))
@@ -187,7 +203,7 @@ def raise_floor() -> None:
 
 
 def leftovers_warning(git: Repo, package: str) -> str:
-    """Warn when the package left out of a single-package release has changes since its last release.
+    """Warn when the other package has changes since its last release. Use this for one package.
 
     Returns:
         A GitHub alert, or an empty string.
@@ -199,9 +215,9 @@ def leftovers_warning(git: Repo, package: str) -> str:
         return ""
     floor = FLOOR.findall(Path(CONNECTORS).read_text(encoding="utf-8"))[0]
     return (
-        f"> [!WARNING]\n> {other} has {len(pending)} commits since {last} that this release leaves out, and\n"
-        f"> timenet-connectors keeps {floor}. If those commits go with the {package} changes,\n"
-        "> release both instead.\n\n"
+        f"> [!WARNING]\n> {other} has {len(pending)} commits since {last}. This release leaves them out.\n"
+        f"> timenet-connectors keeps {floor}. If those commits belong with the {package} changes,\n"
+        "> release both packages instead.\n\n"
     )
 
 
@@ -223,7 +239,7 @@ def prepare(package: str, requested: str, *, dry_run: bool) -> None:
 
 
 def released() -> None:
-    """Find the packages whose version the merged release PR changed, and write them to the outputs."""
+    """Find the packages whose version the merged release PR changed. Write them to the outputs."""
     git = repo()
     found = {}
     for package in PACKAGES:
@@ -247,12 +263,14 @@ def merged_notes(remote: Repository, sha: str) -> dict[str, str]:
     """
     for pull in remote.get_commit(sha).get_pulls():
         if pull.merged and pull.head.ref.startswith("release/"):
-            return {match["package"]: match["text"] for match in NOTES.finditer(pull.body or "")}
+            return {
+                match["package"]: match["text"] for match in NOTES.finditer((pull.body or "").replace("\r\n", "\n"))
+            }
     fail(f"No merged release PR holds {sha}.")
 
 
 def github_release(entries: dict[str, str]) -> None:
-    """Create the tag and the GitHub release of each package, and attach its files from ``dist/``.
+    """Create the tag and the GitHub release of each package. Attach its files from ``dist/``.
 
     A re-run creates only what is missing.
     """
@@ -292,10 +310,10 @@ print('smoke ok:', {module}.__name__, commit)
 
 
 def smoke() -> None:
-    """Import each built wheel and sdist, and check that it records this commit, clean.
+    """Import each built wheel and sdist. Make sure that each file records this commit, clean.
 
-    timenet-connectors gets the timenet wheel built in the same run when there is one. Otherwise
-    timenet resolves from the index, which needs it to be published already.
+    timenet-connectors uses the timenet wheel from the same run, if there is one. If there is none,
+    timenet comes from the index. Then timenet must be on the index already.
     """
     sha = repo().head.commit.hexsha
     stems = {package: package.replace("-", "_") for package in PACKAGES}
@@ -312,7 +330,10 @@ def smoke() -> None:
 
 
 def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
-    """Open the PR that moves each released package that main still holds to its next development version."""
+    """Open the PR that moves each released package to its next development version.
+
+    Do this only for packages that main still holds at the released version.
+    """
     names, tags = [], []
     for package, version in entries.items():
         if version_of(package) != version:
@@ -326,7 +347,7 @@ def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
     run("uv", "lock")
     title = f"chore: start {' and '.join(names)} development"
     released = " ".join(f"{package}={version}" for package, version in entries.items())
-    body = f"Moves the released packages to their next development version ({released} released), so builds from main are not mistaken for a release."
+    body = f"This PR moves the released packages to their next development version ({released} released). Then builds from main do not look like a release."
     open_pr("chore/start-development-after-" + "-".join(tags), title, body, dry_run=dry_run, auto_merge=True)
 
 
@@ -345,12 +366,13 @@ if __name__ == "__main__":
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--package", choices=["both", *PACKAGES], required=True)
     prepare_parser.add_argument("--version", default="")
+    prepare_parser.add_argument("--dry-run", action="store_true")
     commands.add_parser("released")
     commands.add_parser("smoke")
     commands.add_parser("github-release").add_argument("--released", required=True)
-    commands.add_parser("next-dev").add_argument("--released", required=True)
-    for sub in (prepare_parser, commands.choices["next-dev"]):
-        sub.add_argument("--dry-run", action="store_true")
+    next_dev_parser = commands.add_parser("next-dev")
+    next_dev_parser.add_argument("--released", required=True)
+    next_dev_parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.package, args.version, dry_run=args.dry_run)
