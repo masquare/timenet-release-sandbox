@@ -30,7 +30,7 @@ from typing import NoReturn
 
 from connector_notes import SKIP, badge, notes as connector_notes, repo
 from git import Repo
-from github import Auth, Github, UnknownObjectException
+from github import Auth, Github, GithubException, UnknownObjectException
 from github.Repository import Repository
 
 
@@ -118,8 +118,12 @@ def github() -> Repository:
     return Github(auth=Auth.Token(os.environ["GH_TOKEN"])).get_repo(os.environ["GITHUB_REPOSITORY"])
 
 
-def open_pr(branch: str, title: str, body: str, *, dry_run: bool) -> None:
-    """Commit the working tree to ``branch``, push it, and open or update its PR against main."""
+def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bool = False) -> None:
+    """Commit the working tree to ``branch``, push it, and open or update its PR against main.
+
+    With ``auto_merge`` the PR merges by itself once it has the approvals and checks main requires.
+    When the repository does not allow auto-merge, this only warns.
+    """
     if dry_run:
         print(f"{title}\n{branch}\n\n{body}")
         return
@@ -134,7 +138,14 @@ def open_pr(branch: str, title: str, body: str, *, dry_run: bool) -> None:
     open_prs = list(remote.get_pulls(state="open", head=f"{remote.owner.login}:{branch}"))
     pull = open_prs[0] if open_prs else remote.create_pull(title=title, body=body, head=branch, base="main")
     pull.edit(body=body)
-    append("GITHUB_STEP_SUMMARY", f"### {title}\n\n{pull.html_url}\n")
+    note = ""
+    if auto_merge:
+        try:
+            pull.enable_automerge(merge_method="SQUASH")
+            note = "\nIt merges by itself once it has the approvals main requires.\n"
+        except GithubException as error:
+            print(f"::warning title=Auto-merge is off::{error.data}")
+    append("GITHUB_STEP_SUMMARY", f"### {title}\n\n{pull.html_url}\n{note}")
 
 
 def next_version(git: Repo, package: str, requested: str) -> str:
@@ -292,7 +303,7 @@ def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
     title = f"chore: start {' and '.join(names)} development"
     released = " ".join(f"{package}={version}" for package, version in entries.items())
     body = f"Moves the released packages to their next development version ({released} released), so builds from main are not mistaken for a release."
-    open_pr("chore/start-development-after-" + "-".join(tags), title, body, dry_run=dry_run)
+    open_pr("chore/start-development-after-" + "-".join(tags), title, body, dry_run=dry_run, auto_merge=True)
 
 
 def parse(text: str) -> dict[str, str]:
