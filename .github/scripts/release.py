@@ -75,7 +75,7 @@ def version_of(package: str) -> str:
     Returns:
         The version in its ``pyproject.toml``.
     """
-    return uv("version", "--package", package, "--short", "--frozen")
+    return uv("version", "--package", package, "--short", "--no-sync")
 
 
 def cliff(package: str, *args: str) -> str:
