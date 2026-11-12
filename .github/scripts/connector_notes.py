@@ -5,7 +5,7 @@
 # [tool.ty.rules]
 # unresolved-import = "ignore"
 # ///
-"""Print the release notes of timenet-connectors between two refs.
+"""Write the release notes of timenet-connectors between two refs, and the PyPI badge of a release.
 
 The notes list the connectors that were added, changed or removed, and the changes to the shared
 connector code (the "framework"). Core changes that only touched connector files on the way are
@@ -20,13 +20,9 @@ left out; the timenet notes list them.
 - A connector PR is a ``feat``, a ``fix`` or a breaking change that did not touch
   ``packages/timenet``. A core PR edits connectors on the way, and the timenet notes list it.
 
-Called by .github/workflows/release.yml. Run it the way the workflow does::
-
-    uv run --no-project .github/scripts/connector_notes.py v0.11.0 HEAD \
-        --release timenet-connectors-v0.12.0
+.github/scripts/release.py imports it.
 """
 
-import argparse
 import re
 
 from git import Repo
@@ -34,7 +30,6 @@ from git import Repo
 
 PACKAGE = "packages/timenet-connectors"
 DATASETS = f"{PACKAGE}/src/timenet_connectors/datasets"
-PR_URL = "https://github.com/OpenTSLM/TimeNet/pull/"
 # A squash-merged PR title: type(scope)!: description (#123).
 SUBJECT = re.compile(r"^(?P<type>\w+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?: (?P<text>.+?)(?: \(#(?P<pr>\d+)\))?$")
 # The commits cliff.toml skips: release and development-version commits.
@@ -68,13 +63,13 @@ def notable(subject: str) -> bool:
 
 
 def link(sha: str, subject: str) -> str:
-    """Link the PR of a commit, or name the commit when it has no PR number.
+    """Name the PR of a commit, which GitHub turns into a link, or the commit when it has no PR number.
 
     Returns:
-        A markdown link, or the short hash.
+        ``#123`` or the short hash.
     """
     number = re.search(r"\(#(\d+)\)$", subject)
-    return f"[#{number[1]}]({PR_URL}{number[1]})" if number else sha
+    return f"#{number[1]}" if number else sha
 
 
 def connectors(ref: str) -> dict[str, tuple[str, str]]:
@@ -160,7 +155,7 @@ def notes(base: str, head: str) -> str:
 
 
 def badge(release: str) -> str:
-    """Render the PyPI badge of a ``<package>-vX.Y.Z`` tag, like the one cliff.toml writes.
+    """Render the PyPI badge of a ``<package>-vX.Y.Z`` tag.
 
     Returns:
         The markdown badge and a blank line.
@@ -169,14 +164,3 @@ def badge(release: str) -> str:
     label = package.replace("-", "--")
     image = f"https://img.shields.io/badge/{label}-{version}-blue?logo=pypi&logoColor=white"
     return f"[![{package} {version}]({image})](https://pypi.org/project/{package}/{version}/)\n\n"
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("base", help="the last release tag")
-    parser.add_argument("head", help="the commit to release")
-    parser.add_argument(
-        "--release", help="the release tag, for example timenet-connectors-v0.12.0, to add a PyPI badge"
-    )
-    args = parser.parse_args()
-    print((badge(args.release) if args.release else "") + notes(args.base, args.head), end="")

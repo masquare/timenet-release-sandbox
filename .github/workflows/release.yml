@@ -1,35 +1,25 @@
 name: Release
 
-# Releases masquare-timenet, masquare-timenet-connectors, or both. Each package has its own version and its own tag,
-# <package>-vX.Y.Z. The masquare-timenet notes list the commits that touched packages/timenet. The
-# masquare-timenet-connectors notes list the connectors added, changed or removed, and the changes to the
-# shared connector code (.github/scripts/connector_notes.py). The steps with logic live in
-# .github/scripts/release.py.
-#   1. Run this workflow on main and pick the package. It opens a release PR that sets the version
-#      and shows the notes. Edit the notes in the PR body, between the release-notes markers. The
-#      release uses the text it finds there when the PR is merged.
-#   2. Merge the release PR. The rest runs in this workflow, one job after the other:
-#        release: for every package whose version the PR changed, builds and smoke-tests the wheel
-#          and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release with the two files
-#          attached.
-#        next-development-version: opens a PR that moves the released packages to their next
-#          development version, X.(Y+1).0.dev0. Merge it any time.
-#        publish-testpypi: waits for approval in the pypi environment, then uploads those files.
-#        publish-pypi: waits for approval too, then uploads the same files.
-#      The publish jobs upload the files the release holds. They do not build.
-# Releasing both raises the masquare-timenet floor of masquare-timenet-connectors to the new masquare-timenet version.
-# Releasing one package alone keeps the floor. The release PR warns when the other package has
-# changes that the release leaves out.
-# The version is fixed when the release PR opens. If main gets changes that need a bigger bump
-# before you merge it, close the release PR and run this workflow again.
-# Every job can be re-run: steps that already happened are skipped, and an upload skips the files
-# the index already has.
-# Only admins and maintainers can start a release, merge the release PR, or re-run a job. If
-# someone else merges the release PR, nothing is tagged until an admin or maintainer re-runs it.
+# Releases masquare-timenet, masquare-timenet-connectors, or both, each with its own version and tag
+# <package>-vX.Y.Z. The steps with logic are in .github/scripts/release.py.
+#   1. Run this workflow on main and pick the package. It opens a release PR that sets the versions.
+#      Its body holds the notes, between release-notes markers. Edit them there: the release uses
+#      the text it finds in the merged PR.
+#   2. Merge the release PR. The same workflow then builds and smoke-tests the files, tags and
+#      creates the GitHub releases, opens a PR for the next development version (merge it any
+#      time), and waits for approval in the pypi environment to upload to TestPyPI, and again to
+#      upload to PyPI. The uploads publish the built files and do not build.
+# Releasing both raises the masquare-timenet floor of masquare-timenet-connectors. A single-package release warns
+# when the other package has changes it leaves out. The version is fixed when the release PR opens.
+# If main needs a bigger bump before you merge it, close the PR and run the workflow again.
+# Only admins and maintainers can start a release, merge the release PR, or re-run a job. Every job
+# can be re-run: steps that already happened are skipped.
 #
 # Needs a GitHub App with contents and pull-requests write access, installed on this repository,
 # with its id in the RELEASE_APP_ID variable and its key in the RELEASE_APP_PRIVATE_KEY secret.
 # PRs opened with GITHUB_TOKEN are blocked by the repository settings and would not run CI.
+# The development version PR merges itself once it has the approvals main requires, when the
+# repository allows auto-merge.
 
 on:
   workflow_dispatch:
@@ -55,7 +45,6 @@ permissions:
 
 env:
   GIT_CLIFF: git-cliff==2.14.2
-  GH_REPO: ${{ github.repository }}
 
 jobs:
   authorize:
@@ -103,7 +92,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PACKAGE: ${{ inputs.package }}
           REQUESTED: ${{ inputs.version }}
-        run: uv run .github/scripts/release.py prepare --package "$PACKAGE" ${REQUESTED:+--version "$REQUESTED"}
+        run: uv run .github/scripts/release.py prepare --package "$PACKAGE" --version "$REQUESTED"
 
   release:
     needs: authorize
@@ -157,9 +146,8 @@ jobs:
     environment:
       name: pypi
     permissions:
-      # Mint the OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
+      # The OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
       id-token: write
-      contents: read
     steps:
       - uses: astral-sh/setup-uv@v8.2.0
       - uses: actions/download-artifact@v4
@@ -177,9 +165,7 @@ jobs:
     environment:
       name: pypi
     permissions:
-      # Mint the OIDC token uv exchanges for a trusted-publishing token. No API tokens are stored.
       id-token: write
-      contents: read
     steps:
       - uses: astral-sh/setup-uv@v8.2.0
       - uses: actions/download-artifact@v4
@@ -196,8 +182,6 @@ jobs:
     # OIDC token that uploads to PyPI.
     needs: release
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - id: app-token
         uses: actions/create-github-app-token@v2

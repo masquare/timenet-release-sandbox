@@ -12,9 +12,6 @@ body = """
 {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
 {{ commit.message | split(pat="\n") | first | trim | upper_first }}
 {%- endmacro -%}
-{% if version and version is containing("-v") %}{% set package = version | split(pat="-v") | first %}{% set v = version | split(pat="-v") | last %}
-[![{{ package }} {{ v }}](https://img.shields.io/badge/{{ package | replace(from="-", to="--") }}-{{ v }}-blue?logo=pypi&logoColor=white)](https://test.pypi.org/project/{{ package }}/{{ v }}/)
-{% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim }}
 {% for commit in commits | filter(attribute="breaking", value=true) %}
@@ -32,17 +29,10 @@ trim = true
 conventional_commits = true
 filter_unconventional = false
 split_commits = false
-# Only release tags count. This skips the registry-dev/... and backup/... tags. release.yml narrows
-# it to one package with --tag-pattern; the legacy vX.Y.Z tags count for both packages.
-tag_pattern = "^((masquare-timenet|masquare-timenet-connectors)-)?v[0-9]+\\.[0-9]+\\.[0-9]+$"
 topo_order = false
 sort_commits = "newest"
 protect_breaking_commits = true
 filter_commits = false
-# Link PR numbers explicitly, so they also work outside this repository's GitHub pages.
-commit_preprocessors = [
-  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/OpenTSLM/TimeNet/pull/${1}))" },
-]
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^chore: start .* development", skip = true },

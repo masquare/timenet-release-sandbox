@@ -28,9 +28,10 @@ import os
 from pathlib import Path
 import re
 import subprocess  # ruff: ignore[suspicious-subprocess-import] - the commands are fixed argument vectors
+import tomllib
 from typing import NoReturn
 
-from connector_notes import SKIP, badge, notes as connector_notes, repo
+from connector_notes import badge, commits, notes as connector_notes, repo
 from git import Repo
 from github import Auth, Github, GithubException, UnknownObjectException
 from github.Repository import Repository
@@ -62,22 +63,13 @@ def run(*command: str) -> str:
     return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()  # ruff: ignore[subprocess-without-shell-equals-true] - a fixed argument vector
 
 
-def uv(*args: str) -> str:
-    """Run ``uv``.
-
-    Returns:
-        Its output.
-    """
-    return run("uv", *args)
-
-
 def version_of(package: str) -> str:
     """Read the version of a workspace package.
 
     Returns:
         The version in its ``pyproject.toml``.
     """
-    return uv("version", "--package", package, "--short", "--no-sync")
+    return run("uv", "version", "--package", package, "--short", "--no-sync")
 
 
 def cliff(package: str, *args: str) -> str:
@@ -138,8 +130,11 @@ def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bo
     git.git.push("--force", "origin", branch)
     remote = github()
     open_prs = list(remote.get_pulls(state="open", head=f"{remote.owner.login}:{branch}"))
-    pull = open_prs[0] if open_prs else remote.create_pull(title=title, body=body, head=branch, base="main")
-    pull.edit(body=body)
+    if open_prs:
+        pull = open_prs[0]
+        pull.edit(body=body)
+    else:
+        pull = remote.create_pull(title=title, body=body, head=branch, base="main")
     note = ""
     if auto_merge:
         try:
@@ -163,7 +158,7 @@ def next_version(git: Repo, package: str, requested: str) -> str:
     for tag in (f"{package}-v{version}", f"v{version}"):
         if tag in tag_names:
             fail(f"Tag {tag} already exists. Is {package} unchanged since then?")
-    uv("version", "--package", package, version, "--frozen")
+    run("uv", "version", "--package", package, version, "--frozen")
     return version
 
 
@@ -173,12 +168,12 @@ def package_notes(git: Repo, package: str, version: str) -> str:
     Returns:
         The markdown.
     """
-    tag = f"{package}-v{version}"
     if package == "masquare-timenet-connectors":
-        body = badge(tag) + connector_notes(last_tag(git, package), "HEAD")
+        body = connector_notes(last_tag(git, package), "HEAD")
     else:
-        body = cliff(package, "--unreleased", "--tag", tag, "--strip", "header")
-    return f"## {package} {version}\n\n<!-- release-notes:{package} -->\n{body.strip()}\n<!-- /release-notes -->\n\n"
+        body = cliff(package, "--unreleased", "--strip", "header")
+    notes = badge(f"{package}-v{version}") + body
+    return f"## {package} {version}\n\n<!-- release-notes:{package} -->\n{notes.strip()}\n<!-- /release-notes -->\n\n"
 
 
 def raise_floor() -> None:
@@ -199,8 +194,7 @@ def leftovers_warning(git: Repo, package: str) -> str:
     """
     other = "masquare-timenet-connectors" if package == "masquare-timenet" else "masquare-timenet"
     last = last_tag(git, other)
-    log = git.git.log("--format=%s", f"{last}..HEAD", "--", f"packages/{other.removeprefix('masquare-')}")
-    pending = [subject for subject in log.splitlines() if not SKIP.match(subject)]
+    pending = commits(last, "HEAD", f"packages/{other.removeprefix('masquare-')}")
     if not pending:
         return ""
     floor = FLOOR.findall(Path(CONNECTORS).read_text(encoding="utf-8"))[0]
@@ -222,23 +216,20 @@ def prepare(package: str, requested: str, *, dry_run: bool) -> None:
         warning = ""
     else:
         warning = leftovers_warning(git, package)
-    uv("lock")
+    run("uv", "lock")
     title = "chore(release): " + ", ".join(f"{name} {version}" for name, version in versions.items())
     branch = "release/" + "-".join(f"{name}-v{version}" for name, version in versions.items())
     open_pr(branch, title, f"{EXPLAIN}\n---\n\n{warning}{sections}", dry_run=dry_run)
 
 
-def released(git: Repo) -> dict[str, str]:
-    """Find the packages whose version the merged release PR changed, and write them to the outputs.
-
-    Returns:
-        The version of each released package.
-    """
+def released() -> None:
+    """Find the packages whose version the merged release PR changed, and write them to the outputs."""
+    git = repo()
     found = {}
     for package in PACKAGES:
         version = version_of(package)
         before = (git.commit("HEAD^").tree / f"packages/{package.removeprefix('masquare-')}/pyproject.toml").data_stream.read().decode()
-        if version == re.findall(r'^version = "(.*)"$', before, re.M)[0]:
+        if version == tomllib.loads(before)["project"]["version"]:
             continue
         if not VERSION.fullmatch(version):
             fail(f"{package} is at {version}, not X.Y.Z.")
@@ -246,7 +237,6 @@ def released(git: Repo) -> dict[str, str]:
     if not found:
         fail("This PR changed no package version.")
     append("GITHUB_OUTPUT", "released=" + " ".join(f"{name}={version}" for name, version in found.items()) + "\n")
-    return found
 
 
 def merged_notes(remote: Repository, sha: str) -> dict[str, str]:
@@ -290,13 +280,14 @@ def github_release(entries: dict[str, str]) -> None:
         append("GITHUB_STEP_SUMMARY", f"- {package} {version}: {release.html_url} ({indexes} once uploaded)\n")
 
 
-COMMIT_CHECK = """
+SMOKE = """
+import {module}
 from timenet.manifest import GitSource
 from timenet.provenance import PackageSnapshot
 commit = PackageSnapshot.read({dist!r}).source
 expected = GitSource(sha={sha!r}, contains_local_changes=False)
 assert commit == expected, (commit, expected)
-print('commit ok:', commit)
+print('smoke ok:', {module}.__name__, commit)
 """
 
 
@@ -307,18 +298,16 @@ def smoke() -> None:
     timenet resolves from the index, which needs it to be published already.
     """
     sha = repo().head.commit.hexsha
-    core, connectors = (package.replace("-", "_") for package in PACKAGES)
-    core_wheels = sorted(Path("dist").glob(f"{core}-*.whl"))
-    for package, stem in zip(PACKAGES, (core, connectors), strict=True):
-        module = stem.removeprefix('masquare_')
+    stems = {package: package.replace("-", "_") for package in PACKAGES}
+    core_wheels = sorted(Path("dist").glob(f"{stems[PACKAGES[0]]}-*.whl"))
+    for package, stem in stems.items():
+        extras = core_wheels if package == PACKAGES[1] else []
         for artifact in sorted(Path("dist").glob(f"{stem}-*")):
-            extras = core_wheels if package == PACKAGES[1] else []
             command = ["uv", "run", "--isolated", "--no-project"]
             for file in (*extras, artifact):
                 command += ["--with", str(file)]
             print(f"::group::{artifact.name}")
-            print(run(*command, "python", "-c", f"import {module}; print('smoke ok:', {module}.__name__)"))
-            print(run(*command, "python", "-c", COMMIT_CHECK.format(dist=package, sha=sha)))
+            print(run(*command, "python", "-c", SMOKE.format(module=stem.removeprefix('masquare_'), dist=package, sha=sha)))
             print("::endgroup::")
 
 
@@ -329,12 +318,12 @@ def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
         if version_of(package) != version:
             print(f"main already moved {package} past {version}.")
             continue
-        uv("version", "--package", package, "--bump", "minor", "--bump", "dev=0", "--frozen")
+        run("uv", "version", "--package", package, "--bump", "minor", "--bump", "dev=0", "--frozen")
         names.append(f"{package} {version_of(package).removesuffix('.dev0')}")
         tags.append(f"{package}-v{version}")
     if not names:
         return
-    uv("lock")
+    run("uv", "lock")
     title = f"chore: start {' and '.join(names)} development"
     released = " ".join(f"{package}={version}" for package, version in entries.items())
     body = f"Moves the released packages to their next development version ({released} released), so builds from main are not mistaken for a release."
@@ -366,7 +355,7 @@ if __name__ == "__main__":
     if args.command == "prepare":
         prepare(args.package, args.version, dry_run=args.dry_run)
     elif args.command == "released":
-        released(repo())
+        released()
     elif args.command == "smoke":
         smoke()
     elif args.command == "github-release":
