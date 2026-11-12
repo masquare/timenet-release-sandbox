@@ -10,6 +10,8 @@
 - ``prepare`` sets the versions, writes the release notes and opens the release PR. The notes sit
   in the PR body between ``<!-- release-notes:<package> -->`` markers, so they can be edited there.
 - ``released`` names the packages whose version the merged release PR changed.
+- ``smoke`` imports each built wheel and sdist in an isolated environment and checks that it records
+  the commit it was built from.
 - ``github-release`` tags each released package and creates its GitHub release with the notes it
   reads from the merged PR, then attaches the files in ``dist/``.
 - ``next-dev`` opens the PR that moves the released packages to their next development version.
@@ -31,6 +33,7 @@ from typing import NoReturn
 from connector_notes import SKIP, badge, notes as connector_notes, repo
 from git import Repo
 from github import Auth, Github, GithubException, UnknownObjectException
+from github.PullRequest import PullRequest
 from github.Repository import Repository
 
 
@@ -118,6 +121,23 @@ def github() -> Repository:
     return Github(auth=Auth.Token(os.environ["GH_TOKEN"])).get_repo(os.environ["GITHUB_REPOSITORY"])
 
 
+def request_review(pull: PullRequest) -> None:
+    """Ask the people and teams in ``RELEASE_REVIEWERS`` to review a PR.
+
+    The variable lists comma separated GitHub logins and ``org/team`` names. When it is empty,
+    nobody is asked. A request GitHub refuses only warns.
+    """
+    names = [name.strip() for name in os.environ.get("RELEASE_REVIEWERS", "").split(",") if name.strip()]
+    if not names:
+        return
+    teams = [name.partition("/")[2] for name in names if "/" in name]
+    users = [name for name in names if "/" not in name]
+    try:
+        pull.create_review_request(reviewers=users, team_reviewers=teams)
+    except GithubException as error:
+        print(f"::warning title=Review request refused::{error.data}")
+
+
 def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bool = False) -> None:
     """Commit the working tree to ``branch``, push it, and open or update its PR against main.
 
@@ -138,6 +158,8 @@ def open_pr(branch: str, title: str, body: str, *, dry_run: bool, auto_merge: bo
     open_prs = list(remote.get_pulls(state="open", head=f"{remote.owner.login}:{branch}"))
     pull = open_prs[0] if open_prs else remote.create_pull(title=title, body=body, head=branch, base="main")
     pull.edit(body=body)
+    if not open_prs:
+        request_review(pull)
     note = ""
     if auto_merge:
         try:
@@ -284,7 +306,40 @@ def github_release(entries: dict[str, str]) -> None:
         for file in files:
             if file.name not in attached:
                 release.upload_asset(str(file))
-        append("GITHUB_STEP_SUMMARY", f"- {package} {version}: {release.html_url}\n")
+        indexes = f"[TestPyPI](https://test.pypi.org/project/{package}/{version}/), [PyPI](https://pypi.org/project/{package}/{version}/)"
+        append("GITHUB_STEP_SUMMARY", f"- {package} {version}: {release.html_url} ({indexes} once uploaded)\n")
+
+
+COMMIT_CHECK = """
+from timenet.manifest import GitSource
+from timenet.provenance import PackageSnapshot
+commit = PackageSnapshot.read({dist!r}).source
+expected = GitSource(sha={sha!r}, contains_local_changes=False)
+assert commit == expected, (commit, expected)
+print('commit ok:', commit)
+"""
+
+
+def smoke() -> None:
+    """Import each built wheel and sdist, and check that it records this commit, clean.
+
+    timenet-connectors gets the timenet wheel built in the same run when there is one. Otherwise
+    timenet resolves from the index, which needs it to be published already.
+    """
+    sha = repo().head.commit.hexsha
+    core, connectors = (package.replace("-", "_") for package in PACKAGES)
+    core_wheels = sorted(Path("dist").glob(f"{core}-*.whl"))
+    for package, stem in zip(PACKAGES, (core, connectors), strict=True):
+        module = stem.removeprefix('masquare_')
+        for artifact in sorted(Path("dist").glob(f"{stem}-*")):
+            extras = core_wheels if package == PACKAGES[1] else []
+            command = ["uv", "run", "--isolated", "--no-project"]
+            for file in (*extras, artifact):
+                command += ["--with", str(file)]
+            print(f"::group::{artifact.name}")
+            print(run(*command, "python", "-c", f"import {module}; print('smoke ok:', {module}.__name__)"))
+            print(run(*command, "python", "-c", COMMIT_CHECK.format(dist=package, sha=sha)))
+            print("::endgroup::")
 
 
 def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
@@ -322,6 +377,7 @@ if __name__ == "__main__":
     prepare_parser.add_argument("--package", choices=["both", *PACKAGES], required=True)
     prepare_parser.add_argument("--version", default="")
     commands.add_parser("released")
+    commands.add_parser("smoke")
     commands.add_parser("github-release").add_argument("--released", required=True)
     commands.add_parser("next-dev").add_argument("--released", required=True)
     for sub in (prepare_parser, commands.choices["next-dev"]):
@@ -331,6 +387,8 @@ if __name__ == "__main__":
         prepare(args.package, args.version, dry_run=args.dry_run)
     elif args.command == "released":
         released(repo())
+    elif args.command == "smoke":
+        smoke()
     elif args.command == "github-release":
         github_release(parse(args.released))
     else:

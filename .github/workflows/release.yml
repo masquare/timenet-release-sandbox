@@ -101,6 +101,7 @@ jobs:
       - name: Set the versions, write the notes and open the release PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_REVIEWERS: ${{ vars.RELEASE_REVIEWERS }}
           PACKAGE: ${{ inputs.package }}
           REQUESTED: ${{ inputs.version }}
         run: uv run .github/scripts/release.py prepare --package "$PACKAGE" ${REQUESTED:+--version "$REQUESTED"}
@@ -133,42 +134,16 @@ jobs:
             uv run scripts/build_dists.py --package "${entry%=*}"
           done
       - name: Smoke test built artifacts
-        # Import each built wheel and sdist in an isolated environment to catch missing files or
-        # broken metadata before uploading. Each artifact must also report this commit, clean, as
-        # the code it was built from. masquare-timenet-connectors depends on masquare-timenet, so hand it the
-        # wheel we just built when it is present (a `both` run); otherwise masquare-timenet resolves from the
-        # default index, which requires it to be published already.
+        # Import each artifact in an isolated environment, and check it records this commit.
         run: |
-          set -euo pipefail
           if curl -sfo /dev/null https://test.pypi.org/simple/masquare-timenet/; then export UV_FIND_LINKS=https://test.pypi.org/simple/masquare-timenet/; fi
-          shopt -s nullglob
-          timenet_whl=(dist/masquare_timenet-*.whl)
-          # The merge commit that the tags point at.
-          expected_sha=$(git rev-parse HEAD)
-          smoke() {
-            local module="$1" dist="$2"; shift 2
-            local args=() artifact
-            for artifact in "$@"; do args+=(--with "$artifact"); done
-            echo "::group::import $module"
-            uv run --isolated --no-project "${args[@]}" \
-              python -c "import $module; print('smoke ok:', $module.__name__)"
-            uv run --isolated --no-project "${args[@]}" python -c "
-          from timenet.manifest import GitSource
-          from timenet.provenance import PackageSnapshot
-          commit = PackageSnapshot.read('$dist').source
-          expected = GitSource(sha='$expected_sha', contains_local_changes=False)
-          assert commit == expected, f'$dist records {commit}, expected {expected}'
-          print('commit ok:', commit)"
-            echo "::endgroup::"
-          }
-          for artifact in dist/*; do
-            case "$artifact" in
-              dist/masquare_timenet-*.whl | dist/masquare_timenet-*.tar.gz)
-                smoke timenet masquare-timenet "$artifact" ;;
-              dist/masquare_timenet_connectors-*.whl | dist/masquare_timenet_connectors-*.tar.gz)
-                smoke timenet_connectors masquare-timenet-connectors ${timenet_whl[@]+"${timenet_whl[@]}"} "$artifact" ;;
-            esac
-          done
+          uv run .github/scripts/release.py smoke
+      - name: Keep the built files for the publish jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
       - name: Tag and create the GitHub releases
         # Reads the notes from the merged release PR and attaches the files built above.
         env:
@@ -177,7 +152,7 @@ jobs:
         run: uv run .github/scripts/release.py github-release --released "$RELEASED"
 
   publish-testpypi:
-    # Waits for approval in the pypi environment. Downloads the files the release job attached, so nothing is built here.
+    # Waits for approval in the pypi environment. Uploads the files the release job built, nothing is built here.
     needs: release
     runs-on: ubuntu-latest
     environment:
@@ -188,34 +163,13 @@ jobs:
       contents: read
     steps:
       - uses: astral-sh/setup-uv@v8.2.0
-      - name: Download the release files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASED: ${{ needs.release.outputs.released }}
-        run: |
-          expected=()
-          for entry in $RELEASED; do
-            package=${entry%=*} version=${entry#*=}
-            gh release download "$package-v$version" --dir dist
-            expected+=("${package//-/_}-$version-py3-none-any.whl" "${package//-/_}-$version.tar.gz")
-          done
-          if [ "$(ls dist | sort)" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
-            echo "::error title=Unexpected files::The releases hold $(ls dist | xargs), expected ${expected[*]}."
-            exit 1
-          fi
-          ls -l dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
       - name: Publish to TestPyPI
         # --check-url skips files the index already has, so a re-run after a partial upload resumes.
         run: uv publish --publish-url https://test.pypi.org/legacy/ --check-url https://test.pypi.org/simple/ dist/*
-      - name: Summary
-        run: |
-          for whl in dist/*.whl; do
-            base=$(basename "$whl")
-            project=${base%%-*}
-            project=${project//_/-}
-            rest=${base#*-}
-            echo "- \`$project\` ${rest%%-*} on TestPyPI: https://test.pypi.org/project/$project/${rest%%-*}/"
-          done >> "$GITHUB_STEP_SUMMARY"
 
   publish-pypi:
     # Starts only after TestPyPI took the same files, and waits for approval in the pypi environment too.
@@ -229,34 +183,13 @@ jobs:
       contents: read
     steps:
       - uses: astral-sh/setup-uv@v8.2.0
-      - name: Download the release files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASED: ${{ needs.release.outputs.released }}
-        run: |
-          expected=()
-          for entry in $RELEASED; do
-            package=${entry%=*} version=${entry#*=}
-            gh release download "$package-v$version" --dir dist
-            expected+=("${package//-/_}-$version-py3-none-any.whl" "${package//-/_}-$version.tar.gz")
-          done
-          if [ "$(ls dist | sort)" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
-            echo "::error title=Unexpected files::The releases hold $(ls dist | xargs), expected ${expected[*]}."
-            exit 1
-          fi
-          ls -l dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
       - name: Publish to PyPI
         # --check-url skips files the index already has, so a re-run after a partial upload resumes.
         run: echo "sandbox PyPI upload skipped"
-      - name: Summary
-        run: |
-          for whl in dist/*.whl; do
-            base=$(basename "$whl")
-            project=${base%%-*}
-            project=${project//_/-}
-            rest=${base#*-}
-            echo "- \`$project\` ${rest%%-*} on PyPI: https://pypi.org/project/$project/${rest%%-*}/"
-          done >> "$GITHUB_STEP_SUMMARY"
 
   next-development-version:
     # Runs right after the release, next to the publish jobs. The tag fixes the released version
@@ -284,5 +217,6 @@ jobs:
         # the PR was merged changes nothing.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_REVIEWERS: ${{ vars.RELEASE_REVIEWERS }}
           RELEASED: ${{ needs.release.outputs.released }}
         run: uv run .github/scripts/release.py next-dev --released "$RELEASED"
