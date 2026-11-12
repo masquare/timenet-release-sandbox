@@ -3,9 +3,11 @@ name: Release
 # Releases masquare-timenet, masquare-timenet-connectors, or both. Each package has its own version and its own tag,
 # <package>-vX.Y.Z. The masquare-timenet notes list the commits that touched packages/timenet. The
 # masquare-timenet-connectors notes list the connectors added, changed or removed, and the changes to the
-# shared connector code (.github/scripts/connector_notes.py).
+# shared connector code (.github/scripts/connector_notes.py). The steps with logic live in
+# .github/scripts/release.py.
 #   1. Run this workflow on main and pick the package. It opens a release PR that sets the version
-#      and shows the notes.
+#      and shows the notes. Edit the notes in the PR body, between the release-notes markers. The
+#      release uses the text it finds there when the PR is merged.
 #   2. Merge the release PR. The rest runs in this workflow, one job after the other:
 #        release: for every package whose version the PR changed, builds and smoke-tests the wheel
 #          and the sdist, tags <package>-vX.Y.Z, and creates a GitHub release with the two files
@@ -96,103 +98,12 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
       - uses: astral-sh/setup-uv@v8.2.0
-      - name: Set the versions and write the notes
-        id: versions
-        env:
-          PACKAGE: ${{ inputs.package }}
-          REQUESTED: ${{ inputs.version }}
-        run: |
-          # The legacy vX.Y.Z tags count as the last release of both packages.
-          cliff() {
-            local package=$1; shift
-            uvx "$GIT_CLIFF" --include-path "packages/${package#masquare-}/**" \
-              --tag-pattern "^($package-)?v[0-9]+\.[0-9]+\.[0-9]+$" "$@"
-          }
-          if [ "$PACKAGE" = both ]; then packages="masquare-timenet masquare-timenet-connectors"; else packages=$PACKAGE; fi
-          titles=() tags=()
-          : > "$RUNNER_TEMP/notes.md"
-          for package in $packages; do
-            version=${REQUESTED:-$(cliff "$package" --bumped-version)}
-            version=${version##*v}
-            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error title=Invalid version::'$version' is not X.Y.Z."
-              exit 1
-            fi
-            for tag in "$package-v$version" "v$version"; do
-              if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-                echo "::error title=Version exists::Tag $tag already exists. Is $package unchanged since then?"
-                exit 1
-              fi
-            done
-            uv version --package "$package" "$version" --frozen
-            {
-              echo "## $package $version"
-              echo
-              if [ "$package" = masquare-timenet-connectors ]; then
-                last=$(git describe --tags --abbrev=0 --match "$package-v*" --match 'v*')
-                uv run --no-project .github/scripts/connector_notes.py "$last" HEAD --release "$package-v$version"
-              else
-                cliff "$package" --unreleased --tag "$package-v$version" --strip header
-              fi
-              echo
-            } >> "$RUNNER_TEMP/notes.md"
-            titles+=("$package $version")
-            tags+=("$package-v$version")
-          done
-          connectors=packages/timenet-connectors/pyproject.toml
-          if [ "$PACKAGE" = both ]; then
-            # Connectors needs the masquare-timenet release that ships with it.
-            timenet_version=$(uv version --package masquare-timenet --short)
-            sed -i -E "s/\"masquare-timenet\[build\]>=[^\"]*\"/\"masquare-timenet[build]>=$timenet_version\"/" "$connectors"
-            grep -q "\"masquare-timenet\[build\]>=$timenet_version\"" "$connectors"
-          else
-            # Warn when the other package has changes this release leaves out. Skip the commits
-            # cliff.toml skips too: release and development-version commits.
-            if [ "$PACKAGE" = masquare-timenet ]; then other=masquare-timenet-connectors; else other=masquare-timenet; fi
-            last=$(git describe --tags --abbrev=0 --match "$other-v*" --match 'v*')
-            unreleased=$(git log --format=%s "$last..HEAD" -- "packages/${other#masquare-}" \
-              | grep -cvE '^chore(\(release\)|: start .* development)' || true)
-            if [ "$unreleased" -gt 0 ]; then
-              floor=$(grep -o '"masquare-timenet\[build\]>=[^"]*"' "$connectors")
-              {
-                echo "> [!WARNING]"
-                echo "> $other has $unreleased commits since $last that this release leaves out, and"
-                echo "> masquare-timenet-connectors keeps $floor. If those commits go with the $PACKAGE changes,"
-                echo "> release both instead."
-                echo
-              } >> "$RUNNER_TEMP/notes.md"
-            fi
-          fi
-          uv lock
-          title="chore(release): $(IFS=,; echo "${titles[*]}" | sed 's/,/, /g')"
-          branch="release/$(IFS=-; echo "${tags[*]}")"
-          echo "title=$title" >> "$GITHUB_OUTPUT"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-      - name: Open the release PR
+      - name: Set the versions, write the notes and open the release PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TITLE: ${{ steps.versions.outputs.title }}
-          BRANCH: ${{ steps.versions.outputs.branch }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
-          git commit -am "$TITLE"
-          git push --force origin "$BRANCH"
-          {
-            echo "Merging this PR tags each package below and creates its GitHub release with these notes."
-            echo "The same run then waits for your approval to upload to TestPyPI, and again for PyPI."
-            echo "To change the notes, edit them in the GitHub release after it is created."
-            echo
-            echo "---"
-            echo
-            cat "$RUNNER_TEMP/notes.md"
-          } > "$RUNNER_TEMP/body.md"
-          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
-            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md"
-          else
-            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
-          fi
+          PACKAGE: ${{ inputs.package }}
+          REQUESTED: ${{ inputs.version }}
+        run: uv run .github/scripts/release.py prepare --package "$PACKAGE" ${REQUESTED:+--version "$REQUESTED"}
 
   release:
     needs: authorize
@@ -201,6 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     outputs:
       released: ${{ steps.released.outputs.released }}
     steps:
@@ -211,23 +123,7 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
       - name: Find the packages this PR released
         id: released
-        run: |
-          released=()
-          for package in masquare-timenet masquare-timenet-connectors; do
-            version=$(uv version --package "$package" --short)
-            before=$(git show "HEAD^:packages/${package#masquare-}/pyproject.toml" | sed -n -E 's/^version = "(.*)"$/\1/p')
-            if [ "$version" = "$before" ]; then continue; fi
-            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error title=Invalid version::$package is at $version, not X.Y.Z."
-              exit 1
-            fi
-            released+=("$package=$version")
-          done
-          if [ ${#released[@]} -eq 0 ]; then
-            echo "::error title=Nothing to release::This PR changed no package version."
-            exit 1
-          fi
-          echo "released=${released[*]}" >> "$GITHUB_OUTPUT"
+        run: uv run .github/scripts/release.py released
       - name: Build
         # build_dists.py records the commit inside each package, so a build can name its code.
         env:
@@ -274,49 +170,11 @@ jobs:
             esac
           done
       - name: Tag and create the GitHub releases
+        # Reads the notes from the merged release PR and attaches the files built above.
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASED: ${{ steps.released.outputs.released }}
-        run: |
-          cliff() {
-            local package=$1; shift
-            uvx "$GIT_CLIFF" --include-path "packages/${package#masquare-}/**" \
-              --tag-pattern "^($package-)?v[0-9]+\.[0-9]+\.[0-9]+$" "$@"
-          }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for entry in $RELEASED; do
-            package=${entry%=*} version=${entry#*=}
-            tag="$package-v$version"
-            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-              # A re-run: the tag is already pushed. It must point at this release.
-              if [ "$(git rev-parse "$tag^{commit}")" != "$(git rev-parse HEAD)" ]; then
-                echo "::error title=Tag mismatch::$tag exists on another commit."
-                exit 1
-              fi
-            else
-              git tag -a "$tag" -m "$package $version"
-              git push origin "$tag"
-            fi
-            if ! gh release view "$tag" >/dev/null 2>&1; then
-              if [ "$package" = masquare-timenet-connectors ]; then
-                # The new tag is on HEAD, so the last release is the newest tag before it.
-                last=$(git describe --tags --abbrev=0 --match "$package-v*" --match 'v*' HEAD^)
-                uv run --no-project .github/scripts/connector_notes.py "$last" HEAD --release "$tag" > "$RUNNER_TEMP/notes.md"
-              else
-                cliff "$package" --latest --strip header --output "$RUNNER_TEMP/notes.md"
-              fi
-              gh release create "$tag" --verify-tag --title "$package $version" --notes-file "$RUNNER_TEMP/notes.md"
-            fi
-            # Attach the wheel and the sdist. A re-run uploads only the files that are missing, so
-            # the files a publish run may already have taken stay as they are.
-            attached=$(gh release view "$tag" --json assets --jq '.assets[].name')
-            for file in "dist/${package//-/_}-$version"-*.whl "dist/${package//-/_}-$version".tar.gz; do
-              if ! grep -qxF "$(basename "$file")" <<< "$attached"; then
-                gh release upload "$tag" "$file"
-              fi
-            done
-          done
+        run: uv run .github/scripts/release.py github-release --released "$RELEASED"
 
   publish-testpypi:
     # Waits for approval in the pypi environment. Downloads the files the release job attached, so nothing is built here.
@@ -427,31 +285,4 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASED: ${{ needs.release.outputs.released }}
-        run: |
-          names=()
-          tags=()
-          for entry in $RELEASED; do
-            package=${entry%=*}
-            version=${entry#*=}
-            if [ "$(uv version --package "$package" --short)" != "$version" ]; then
-              echo "main already moved $package past $version."
-              continue
-            fi
-            uv version --package "$package" --bump minor --bump dev=0 --frozen
-            next=$(uv version --package "$package" --short)
-            names+=("$package ${next%.dev0}")
-            tags+=("$package-v$version")
-          done
-          if [ ${#names[@]} -eq 0 ]; then exit 0; fi
-          uv lock
-          title="chore: start $(IFS=,; echo "${names[*]}" | sed 's/,/ and /g') development"
-          branch="chore/start-development-after-$(IFS=-; echo "${tags[*]}")"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git commit -am "$title"
-          git push --force origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --base main --head "$branch" --title "$title" \
-              --body "Moves the released packages to their next development version ($RELEASED released to PyPI), so builds from main are not mistaken for a release."
-          fi
+        run: uv run .github/scripts/release.py next-dev --released "$RELEASED"

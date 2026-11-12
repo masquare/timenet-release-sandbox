@@ -1,0 +1,326 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["GitPython>=3.1", "PyGithub>=2.5"]
+#
+# [tool.ty.rules]
+# unresolved-import = "ignore"
+# ///
+"""The steps of .github/workflows/release.yml that need logic.
+
+- ``prepare`` sets the versions, writes the release notes and opens the release PR. The notes sit
+  in the PR body between ``<!-- release-notes:<package> -->`` markers, so they can be edited there.
+- ``released`` names the packages whose version the merged release PR changed.
+- ``github-release`` tags each released package and creates its GitHub release with the notes it
+  reads from the merged PR, then attaches the files in ``dist/``.
+- ``next-dev`` opens the PR that moves the released packages to their next development version.
+
+GitHub goes through PyGithub and git through GitPython. Only ``uv`` and git-cliff, which have no
+Python API, run as subprocesses. ``--dry-run`` skips the push and the PR, but it edits the working
+tree, so run it in a scratch checkout::
+
+    GIT_CLIFF=git-cliff==2.14.2 uv run .github/scripts/release.py prepare --package both --dry-run
+"""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess  # ruff: ignore[suspicious-subprocess-import] - the commands are fixed argument vectors
+from typing import NoReturn
+
+from connector_notes import SKIP, badge, notes as connector_notes, repo
+from git import Repo
+from github import Auth, Github, UnknownObjectException
+from github.Repository import Repository
+
+
+PACKAGES = ("masquare-timenet", "masquare-timenet-connectors")
+CONNECTORS = "packages/timenet-connectors/pyproject.toml"
+FLOOR = re.compile(r'"masquare-timenet\[build\]>=[^"]*"')
+VERSION = re.compile(r"\d+\.\d+\.\d+")
+NOTES = re.compile(r"<!-- release-notes:(?P<package>[\w-]+) -->\n(?P<text>.*?)\n<!-- /release-notes -->", re.S)
+EXPLAIN = (
+    "Merging this PR tags each package below and creates its GitHub release. The release notes are\n"
+    "the text between the `release-notes` markers, so edit them here before you merge. The same run\n"
+    "then waits for your approval to upload to TestPyPI, and again for PyPI.\n"
+)
+
+
+def fail(message: str) -> NoReturn:
+    """Stop the step with an error message."""
+    raise SystemExit(message)
+
+
+def run(*command: str) -> str:
+    """Run a tool and return its output, or raise when it fails.
+
+    Returns:
+        The standard output without the trailing newline.
+    """
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()  # ruff: ignore[subprocess-without-shell-equals-true] - a fixed argument vector
+
+
+def uv(*args: str) -> str:
+    """Run ``uv``.
+
+    Returns:
+        Its output.
+    """
+    return run("uv", *args)
+
+
+def version_of(package: str) -> str:
+    """Read the version of a workspace package.
+
+    Returns:
+        The version in its ``pyproject.toml``.
+    """
+    return uv("version", "--package", package, "--short", "--frozen")
+
+
+def cliff(package: str, *args: str) -> str:
+    """Run git-cliff for one package. The legacy ``vX.Y.Z`` tags count as the last release of both.
+
+    Returns:
+        Its output.
+    """
+    pattern = rf"^({package}-)?v[0-9]+\.[0-9]+\.[0-9]+$"
+    return run(
+        "uvx", os.environ["GIT_CLIFF"], "--include-path", f"packages/{package.removeprefix('masquare-')}/**", "--tag-pattern", pattern, *args
+    )
+
+
+def last_tag(git: Repo, package: str, ref: str = "HEAD") -> str:
+    """Find the newest release tag of a package that is reachable from ``ref``.
+
+    Returns:
+        The tag name.
+    """
+    return git.git.describe("--tags", "--abbrev=0", "--match", f"{package}-v*", "--match", "v*", ref)
+
+
+def append(variable: str, text: str) -> None:
+    """Append to the file GitHub names in ``variable``, or print when run outside a workflow."""
+    path = os.environ.get(variable)
+    if path:
+        with Path(path).open("a", encoding="utf-8") as file:
+            file.write(text)
+    else:
+        print(text, end="")
+
+
+def github() -> Repository:
+    """Open the repository on GitHub with the token in ``GH_TOKEN``.
+
+    Returns:
+        The repository.
+    """
+    return Github(auth=Auth.Token(os.environ["GH_TOKEN"])).get_repo(os.environ["GITHUB_REPOSITORY"])
+
+
+def open_pr(branch: str, title: str, body: str, *, dry_run: bool) -> None:
+    """Commit the working tree to ``branch``, push it, and open or update its PR against main."""
+    if dry_run:
+        print(f"{title}\n{branch}\n\n{body}")
+        return
+    git = repo()
+    with git.config_writer() as config:
+        config.set_value("user", "name", "github-actions[bot]")
+        config.set_value("user", "email", "41898282+github-actions[bot]@users.noreply.github.com")
+    git.git.switch("-c", branch)
+    git.git.commit("-am", title)
+    git.git.push("--force", "origin", branch)
+    remote = github()
+    open_prs = list(remote.get_pulls(state="open", head=f"{remote.owner.login}:{branch}"))
+    pull = open_prs[0] if open_prs else remote.create_pull(title=title, body=body, head=branch, base="main")
+    pull.edit(body=body)
+    append("GITHUB_STEP_SUMMARY", f"### {title}\n\n{pull.html_url}\n")
+
+
+def next_version(git: Repo, package: str, requested: str) -> str:
+    """Pick the version to release, check that it is new, and write it to the package.
+
+    Returns:
+        The version.
+    """
+    tag_names = {tag.name for tag in git.tags}
+    version = (requested or cliff(package, "--bumped-version")).rpartition("v")[2]
+    if not VERSION.fullmatch(version):
+        fail(f"'{version}' is not X.Y.Z.")
+    for tag in (f"{package}-v{version}", f"v{version}"):
+        if tag in tag_names:
+            fail(f"Tag {tag} already exists. Is {package} unchanged since then?")
+    uv("version", "--package", package, version, "--frozen")
+    return version
+
+
+def package_notes(git: Repo, package: str, version: str) -> str:
+    """Write the notes section of a release, with its editable part between markers.
+
+    Returns:
+        The markdown.
+    """
+    tag = f"{package}-v{version}"
+    if package == "masquare-timenet-connectors":
+        body = badge(tag) + connector_notes(last_tag(git, package), "HEAD")
+    else:
+        body = cliff(package, "--unreleased", "--tag", tag, "--strip", "header")
+    return f"## {package} {version}\n\n<!-- release-notes:{package} -->\n{body.strip()}\n<!-- /release-notes -->\n\n"
+
+
+def raise_floor() -> None:
+    """Make timenet-connectors require the timenet release that ships with it."""
+    floor = f'"masquare-timenet[build]>={version_of("masquare-timenet")}"'
+    path = Path(CONNECTORS)
+    text = FLOOR.sub(floor, path.read_text(encoding="utf-8"))
+    if floor not in text:
+        fail(f"{CONNECTORS} has no timenet floor to raise.")
+    path.write_text(text, encoding="utf-8")
+
+
+def leftovers_warning(git: Repo, package: str) -> str:
+    """Warn when the package left out of a single-package release has changes since its last release.
+
+    Returns:
+        A GitHub alert, or an empty string.
+    """
+    other = "masquare-timenet-connectors" if package == "masquare-timenet" else "masquare-timenet"
+    last = last_tag(git, other)
+    log = git.git.log("--format=%s", f"{last}..HEAD", "--", f"packages/{other.removeprefix('masquare-')}")
+    pending = [subject for subject in log.splitlines() if not SKIP.match(subject)]
+    if not pending:
+        return ""
+    floor = FLOOR.findall(Path(CONNECTORS).read_text(encoding="utf-8"))[0]
+    return (
+        f"> [!WARNING]\n> {other} has {len(pending)} commits since {last} that this release leaves out, and\n"
+        f"> timenet-connectors keeps {floor}. If those commits go with the {package} changes,\n"
+        "> release both instead.\n\n"
+    )
+
+
+def prepare(package: str, requested: str, *, dry_run: bool) -> None:
+    """Set the versions, write the notes, and open the release PR."""
+    git = repo()
+    names = PACKAGES if package == "both" else (package,)
+    versions = {name: next_version(git, name, requested) for name in names}
+    sections = "".join(package_notes(git, name, version) for name, version in versions.items())
+    if package == "both":
+        raise_floor()
+        warning = ""
+    else:
+        warning = leftovers_warning(git, package)
+    uv("lock")
+    title = "chore(release): " + ", ".join(f"{name} {version}" for name, version in versions.items())
+    branch = "release/" + "-".join(f"{name}-v{version}" for name, version in versions.items())
+    open_pr(branch, title, f"{EXPLAIN}\n---\n\n{warning}{sections}", dry_run=dry_run)
+
+
+def released(git: Repo) -> dict[str, str]:
+    """Find the packages whose version the merged release PR changed, and write them to the outputs.
+
+    Returns:
+        The version of each released package.
+    """
+    found = {}
+    for package in PACKAGES:
+        version = version_of(package)
+        before = (git.commit("HEAD^").tree / f"packages/{package.removeprefix('masquare-')}/pyproject.toml").data_stream.read().decode()
+        if version == re.findall(r'^version = "(.*)"$', before, re.M)[0]:
+            continue
+        if not VERSION.fullmatch(version):
+            fail(f"{package} is at {version}, not X.Y.Z.")
+        found[package] = version
+    if not found:
+        fail("This PR changed no package version.")
+    append("GITHUB_OUTPUT", "released=" + " ".join(f"{name}={version}" for name, version in found.items()) + "\n")
+    return found
+
+
+def merged_notes(remote: Repository, sha: str) -> dict[str, str]:
+    """Read the release notes from the body of the merged release PR.
+
+    Returns:
+        The notes of each package.
+    """
+    for pull in remote.get_commit(sha).get_pulls():
+        if pull.merged and pull.head.ref.startswith("release/"):
+            return {match["package"]: match["text"] for match in NOTES.finditer(pull.body or "")}
+    fail(f"No merged release PR holds {sha}.")
+
+
+def github_release(entries: dict[str, str]) -> None:
+    """Create the tag and the GitHub release of each package, and attach its files from ``dist/``.
+
+    A re-run creates only what is missing.
+    """
+    git = repo()
+    sha = git.head.commit.hexsha
+    remote = github()
+    notes = merged_notes(remote, sha)
+    for package, version in entries.items():
+        tag = f"{package}-v{version}"
+        if package not in notes:
+            fail(f"The release PR has no notes for {package}.")
+        try:
+            release = remote.get_release(tag)
+            if remote.get_git_ref(f"tags/{tag}").object.sha != sha:
+                fail(f"{tag} exists on another commit.")
+        except UnknownObjectException:
+            release = remote.create_git_release(tag, f"{package} {version}", notes[package], target_commitish=sha)
+        attached = {asset.name for asset in release.get_assets()}
+        stem = package.replace("-", "_")
+        files = [*Path("dist").glob(f"{stem}-{version}-*.whl"), *Path("dist").glob(f"{stem}-{version}.tar.gz")]
+        for file in files:
+            if file.name not in attached:
+                release.upload_asset(str(file))
+        append("GITHUB_STEP_SUMMARY", f"- {package} {version}: {release.html_url}\n")
+
+
+def next_dev(entries: dict[str, str], *, dry_run: bool) -> None:
+    """Open the PR that moves each released package that main still holds to its next development version."""
+    names, tags = [], []
+    for package, version in entries.items():
+        if version_of(package) != version:
+            print(f"main already moved {package} past {version}.")
+            continue
+        uv("version", "--package", package, "--bump", "minor", "--bump", "dev=0", "--frozen")
+        names.append(f"{package} {version_of(package).removesuffix('.dev0')}")
+        tags.append(f"{package}-v{version}")
+    if not names:
+        return
+    uv("lock")
+    title = f"chore: start {' and '.join(names)} development"
+    released = " ".join(f"{package}={version}" for package, version in entries.items())
+    body = f"Moves the released packages to their next development version ({released} released), so builds from main are not mistaken for a release."
+    open_pr("chore/start-development-after-" + "-".join(tags), title, body, dry_run=dry_run)
+
+
+def parse(text: str) -> dict[str, str]:
+    """Read ``package=version`` pairs.
+
+    Returns:
+        The versions by package.
+    """
+    return dict(pair.split("=") for pair in text.split())
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--package", choices=["both", *PACKAGES], required=True)
+    prepare_parser.add_argument("--version", default="")
+    commands.add_parser("released")
+    commands.add_parser("github-release").add_argument("--released", required=True)
+    commands.add_parser("next-dev").add_argument("--released", required=True)
+    for sub in (prepare_parser, commands.choices["next-dev"]):
+        sub.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.command == "prepare":
+        prepare(args.package, args.version, dry_run=args.dry_run)
+    elif args.command == "released":
+        released(repo())
+    elif args.command == "github-release":
+        github_release(parse(args.released))
+    else:
+        next_dev(parse(args.released), dry_run=args.dry_run)
